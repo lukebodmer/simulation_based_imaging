@@ -99,11 +99,21 @@ class VisualizeBatchPage:
             self.state.simulation_list = sims
             logger.info(f"Found {len(sims)} simulations in batch {selected_batch}")
 
+            # Auto-select the first simulation
+            if sims:
+                self.state.selected_simulation = sims[0]["value"]
+
     def _on_simulation_selected(self, selected_simulation, **kwargs):
         """Handle simulation selection - load parameters and timesteps."""
         self.state.timestep_list = []
         self.state.selected_timestep = ""
         self.state.simulation_parameters_dict = {}
+
+        # Clear cached data from previous simulation
+        self.mesh_data = None
+        self.timestep_data = None
+        self.sensor_data = None
+        self.energy_data = None
 
         if not selected_simulation or not self.state.selected_batch:
             return
@@ -132,6 +142,11 @@ class VisualizeBatchPage:
         # Load timestep list
         sim_dir = DEFAULT_DATA_DIR / batch_name / "simulations" / selected_simulation
         data_dir = sim_dir / "data"
+
+        # Load sensor and energy data first (these are saved once at end of simulation)
+        self._load_sensor_data(sim_dir)
+        self._load_energy_data(sim_dir)
+
         if data_dir.exists():
             timesteps = []
             for f in sorted(data_dir.glob("*.pkl")):
@@ -145,9 +160,12 @@ class VisualizeBatchPage:
             self.state.timestep_list = timesteps
             logger.info(f"Found {len(timesteps)} timesteps")
 
-        # Load sensor and energy data (these are saved once at end of simulation)
-        self._load_sensor_data(sim_dir)
-        self._load_energy_data(sim_dir)
+            # Auto-select the first timestep and load its data
+            if timesteps:
+                first_timestep = timesteps[0]["value"]
+                self.state.selected_timestep = first_timestep
+                # Explicitly load and visualize since state change may not fire
+                self._load_timestep_and_visualize(sim_dir, first_timestep)
 
     def _load_sensor_data(self, sim_dir: Path):
         """Load sensor data from simulation directory."""
@@ -188,10 +206,16 @@ class VisualizeBatchPage:
             return
 
         sim_dir = DEFAULT_DATA_DIR / batch_name / "simulations" / sim_hash
+        self._load_timestep_and_visualize(sim_dir, selected_timestep)
+
+    def _load_timestep_and_visualize(self, sim_dir: Path, timestep_filename: str):
+        """Load timestep data and update all visualizations."""
         data_dir = sim_dir / "data"
+        batch_name = self.state.selected_batch
+        sim_hash = self.state.selected_simulation
 
         # Load timestep data
-        timestep_path = data_dir / selected_timestep
+        timestep_path = data_dir / timestep_filename
         try:
             with open(timestep_path, "rb") as f:
                 self.timestep_data = pickle.load(f)
@@ -308,7 +332,11 @@ class VisualizeBatchPage:
                 opacity="sigmoid",
             )
             self.plotter_wave.show_grid()
+            self.plotter_wave.reset_camera()
             self.plotter_wave.render()
+
+            # Push update to trame UI
+            self.ctrl.view_update_wave()
 
         except Exception as e:
             logger.error(f"Failed to update wave speed plot: {e}")
@@ -360,7 +388,11 @@ class VisualizeBatchPage:
                 )
 
             self.plotter_sim.show_grid()
+            self.plotter_sim.reset_camera()
             self.plotter_sim.render()
+
+            # Push update to trame UI
+            self.ctrl.view_update_sim()
 
         except Exception as e:
             logger.error(f"Failed to update simulation plot: {e}")
@@ -471,6 +503,58 @@ class VisualizeBatchPage:
                 return "\n".join(str(row) for row in value)
         return str(value)
 
+    def _go_to_previous_simulation(self):
+        """Navigate to the previous simulation."""
+        simulations = self.state.simulation_list
+        current = self.state.selected_simulation
+        if not simulations or not current:
+            return
+
+        current_index = next(
+            (i for i, s in enumerate(simulations) if s["value"] == current), -1
+        )
+        if current_index > 0:
+            self.state.selected_simulation = simulations[current_index - 1]["value"]
+
+    def _go_to_next_simulation(self):
+        """Navigate to the next simulation."""
+        simulations = self.state.simulation_list
+        current = self.state.selected_simulation
+        if not simulations or not current:
+            return
+
+        current_index = next(
+            (i for i, s in enumerate(simulations) if s["value"] == current), -1
+        )
+        if current_index < len(simulations) - 1:
+            self.state.selected_simulation = simulations[current_index + 1]["value"]
+
+    def _go_to_previous_timestep(self):
+        """Navigate to the previous timestep."""
+        timesteps = self.state.timestep_list
+        current = self.state.selected_timestep
+        if not timesteps or not current:
+            return
+
+        current_index = next(
+            (i for i, t in enumerate(timesteps) if t["value"] == current), -1
+        )
+        if current_index > 0:
+            self.state.selected_timestep = timesteps[current_index - 1]["value"]
+
+    def _go_to_next_timestep(self):
+        """Navigate to the next timestep."""
+        timesteps = self.state.timestep_list
+        current = self.state.selected_timestep
+        if not timesteps or not current:
+            return
+
+        current_index = next(
+            (i for i, t in enumerate(timesteps) if t["value"] == current), -1
+        )
+        if current_index < len(timesteps) - 1:
+            self.state.selected_timestep = timesteps[current_index + 1]["value"]
+
     def build_ui(self):
         """Build the visualization page UI."""
         with v3.VContainer(fluid=True, classes="fill-height"):
@@ -506,27 +590,65 @@ class VisualizeBatchPage:
                             click=self._refresh_batch_list,
                         )
 
-                # Simulation selection
-                v3.VSelect(
-                    v_model=("selected_simulation",),
-                    items=("simulation_list",),
-                    label="Simulation",
-                    density="compact",
-                    clearable=True,
-                    disabled=("!selected_batch",),
-                )
+                # Simulation selection with navigation buttons
+                with v3.VRow(align="center", dense=True):
+                    with v3.VCol(cols=2, classes="pa-0"):
+                        v3.VBtn(
+                            icon="mdi-chevron-left",
+                            variant="text",
+                            density="compact",
+                            click=self._go_to_previous_simulation,
+                            disabled=("!selected_simulation || simulation_list.length === 0",),
+                        )
+                    with v3.VCol(cols=8, classes="pa-0"):
+                        v3.VSelect(
+                            v_model=("selected_simulation",),
+                            items=("simulation_list",),
+                            label="Simulation",
+                            density="compact",
+                            clearable=True,
+                            disabled=("!selected_batch",),
+                            hide_details=True,
+                        )
+                    with v3.VCol(cols=2, classes="pa-0"):
+                        v3.VBtn(
+                            icon="mdi-chevron-right",
+                            variant="text",
+                            density="compact",
+                            click=self._go_to_next_simulation,
+                            disabled=("!selected_simulation || simulation_list.length === 0",),
+                        )
 
-                # Timestep selection
-                v3.VSelect(
-                    v_model=("selected_timestep",),
-                    items=("timestep_list",),
-                    label="Timestep",
-                    item_title="title",
-                    item_value="value",
-                    density="compact",
-                    clearable=True,
-                    disabled=("!selected_simulation",),
-                )
+                # Timestep selection with navigation buttons
+                with v3.VRow(align="center", dense=True):
+                    with v3.VCol(cols=2, classes="pa-0"):
+                        v3.VBtn(
+                            icon="mdi-chevron-left",
+                            variant="text",
+                            density="compact",
+                            click=self._go_to_previous_timestep,
+                            disabled=("!selected_timestep || timestep_list.length === 0",),
+                        )
+                    with v3.VCol(cols=8, classes="pa-0"):
+                        v3.VSelect(
+                            v_model=("selected_timestep",),
+                            items=("timestep_list",),
+                            label="Timestep",
+                            item_title="title",
+                            item_value="value",
+                            density="compact",
+                            clearable=True,
+                            disabled=("!selected_simulation",),
+                            hide_details=True,
+                        )
+                    with v3.VCol(cols=2, classes="pa-0"):
+                        v3.VBtn(
+                            icon="mdi-chevron-right",
+                            variant="text",
+                            density="compact",
+                            click=self._go_to_next_timestep,
+                            disabled=("!selected_timestep || timestep_list.length === 0",),
+                        )
 
                 v3.VDivider(classes="my-3")
 
@@ -569,19 +691,21 @@ class VisualizeBatchPage:
                 ):
                     # Wave Speed tab
                     with v3.VWindowItem(value="wave", style="height: 100%;"):
-                        plotter_ui(
+                        view_wave = plotter_ui(
                             self.plotter_wave,
                             server=self.server,
                             add_menu=False,
                         )
+                        self.ctrl.view_update_wave = view_wave.update
 
                     # Simulation tab
                     with v3.VWindowItem(value="simulation", style="height: 100%;"):
-                        plotter_ui(
+                        view_sim = plotter_ui(
                             self.plotter_sim,
                             server=self.server,
                             add_menu=False,
                         )
+                        self.ctrl.view_update_sim = view_sim.update
 
                     # Data tab
                     with v3.VWindowItem(value="data", style="height: 100%;"):

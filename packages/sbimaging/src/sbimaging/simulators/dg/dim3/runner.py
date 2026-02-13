@@ -42,6 +42,7 @@ class SimulationRunner:
         config: SimulationConfig,
         output_dir: Path,
         mesh_file: Path | None = None,
+        global_dt: float | None = None,
     ):
         """Initialize simulation runner.
 
@@ -49,12 +50,15 @@ class SimulationRunner:
             config: Simulation configuration.
             output_dir: Directory for output files.
             mesh_file: Path to Gmsh mesh file (overrides config).
+            global_dt: Global time step to use (overrides CFL computation).
+                Use this to ensure all simulations in a batch use the same dt.
         """
         self.config = config
         self.output_dir = Path(output_dir)
         self._mesh_file = mesh_file or (
             Path(config.mesh.msh_file) if config.mesh.msh_file else None
         )
+        self._global_dt = global_dt
 
         self._logger = get_logger(__name__)
         self._element: ReferenceTetrahedron | None = None
@@ -160,14 +164,19 @@ class SimulationRunner:
         self._logger.info(f"Added {len(src_cfg.centers)} sources")
 
     def _setup_time_stepper(self) -> None:
-        """Create time stepper with CFL-based dt."""
-        max_speed = float(self._speed.max())
-        dt = compute_cfl_timestep(
-            smallest_diameter=self._mesh.smallest_diameter,
-            max_speed=max_speed,
-            polynomial_order=self.config.solver.polynomial_order,
-            cfl_factor=self.config.solver.cfl_factor,
-        )
+        """Create time stepper with CFL-based dt or global dt."""
+        if self._global_dt is not None:
+            # Use global dt for batch consistency
+            dt = self._global_dt
+        else:
+            # Compute CFL-based dt for standalone runs
+            max_speed = float(self._speed.max())
+            dt = compute_cfl_timestep(
+                smallest_diameter=self._mesh.smallest_diameter,
+                max_speed=max_speed,
+                polynomial_order=self.config.solver.polynomial_order,
+                cfl_factor=self.config.solver.cfl_factor,
+            )
 
         solver = self.config.solver
         if solver.total_time is not None:

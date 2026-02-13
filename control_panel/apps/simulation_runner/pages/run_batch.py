@@ -1,7 +1,9 @@
 """Run Simulation Batch page."""
 
+import asyncio
 from pathlib import Path
 
+import toml
 from trame.widgets import html
 from trame.widgets import vuetify3 as v3
 
@@ -174,7 +176,8 @@ class RunBatchPage:
         self.state.output_energy_interval = 500
 
         # UI state for expansion panels
-        self.state.expanded_panels = [0, 1, 2]
+        self.state.expanded_panels = [0, 1, 2, 3]
+        self.state.expanded_fixed_panels = [0, 1, 2, 3, 4, 5]
 
         # Advanced: custom base config
         self.state.use_custom_base_config = False
@@ -187,8 +190,16 @@ class RunBatchPage:
         self.state.completed_count = 0
         self.state.failed_count = 0
         self.state.pending_count = 0
+        self.state.total_simulations = 0
+        self.state.progress_percent = 0
         self.state.existing_param_count = 0
         self.state.log_messages = []
+
+        # Save preset dialog state
+        self.state.show_save_preset_dialog = False
+        self.state.save_preset_name = ""
+        self.state.save_preset_description = ""
+        self.state.save_preset_message = ""
 
         self.state.change("selected_preset")(self._on_preset_change)
         self.state.change("batch_name")(self._on_batch_name_change)
@@ -295,27 +306,57 @@ class RunBatchPage:
     def build_ui(self):
         """Build the run batch page UI."""
         with v3.VContainer(fluid=True):
+            # Top row: Status, Run button, Save preset
+            with v3.VRow():
+                with v3.VCol(cols=12):
+                    self._build_status_and_actions()
+
+            # Expand/Collapse buttons
+            with v3.VRow(classes="mb-2"):
+                with v3.VCol(cols=12, classes="d-flex justify-end"):
+                    v3.VBtn(
+                        "Expand All",
+                        variant="text",
+                        density="compact",
+                        prepend_icon="mdi-unfold-more-horizontal",
+                        click=self._expand_all_panels,
+                        classes="mr-2",
+                    )
+                    v3.VBtn(
+                        "Collapse All",
+                        variant="text",
+                        density="compact",
+                        prepend_icon="mdi-unfold-less-horizontal",
+                        click=self._collapse_all_panels,
+                    )
+
+            # Parameter columns
             with v3.VRow():
                 # Left column: Sweep parameters
                 with v3.VCol(cols=12, md=6):
                     self._build_sweep_parameters_panel()
-                # Right column: Fixed parameters + Status
+                # Right column: Fixed parameters
                 with v3.VCol(cols=12, md=6):
                     self._build_fixed_parameters_panel()
-                    self._build_status_card()
 
+            # Log at the bottom
             with v3.VRow():
                 with v3.VCol(cols=12):
                     self._build_log_card()
 
     def build_toolbar_actions(self):
         """Build toolbar action buttons for this page."""
-        v3.VBtn(
-            "Run Batch",
-            color="primary",
-            disabled=("is_running || !batch_name",),
-            click=self._run_batch,
-        )
+        pass
+
+    def _expand_all_panels(self):
+        """Expand all parameter panels."""
+        self.state.expanded_panels = [0, 1, 2, 3]
+        self.state.expanded_fixed_panels = [0, 1, 2, 3, 4, 5, 6]
+
+    def _collapse_all_panels(self):
+        """Collapse all parameter panels."""
+        self.state.expanded_panels = []
+        self.state.expanded_fixed_panels = []
 
     def _build_sweep_parameters_panel(self):
         """Build the sweep parameters panel with collapsible sections."""
@@ -342,7 +383,9 @@ class RunBatchPage:
 
     def _build_fixed_parameters_panel(self):
         """Build the fixed parameters panel with collapsible sections."""
-        with v3.VExpansionPanels(multiple=True, classes="mb-4"):
+        with v3.VExpansionPanels(
+            multiple=True, v_model=("expanded_fixed_panels",), classes="mb-4"
+        ):
             with v3.VExpansionPanel():
                 v3.VExpansionPanelTitle("Sources (Fixed)")
                 with v3.VExpansionPanelText():
@@ -892,33 +935,66 @@ class RunBatchPage:
                     density="compact",
                 )
 
-    def _build_status_card(self):
-        """Build the status display card."""
-        with v3.VCard():
-            v3.VCardTitle("Status")
+    def _build_status_and_actions(self):
+        """Build the status display and action buttons at the top."""
+        with v3.VCard(classes="mb-4"):
             with v3.VCardText():
-                v3.VProgressLinear(
-                    indeterminate=("is_running",),
-                    color="primary",
-                    height=6,
-                )
-                with v3.VRow(classes="mt-3", dense=True):
-                    with v3.VCol(cols=4):
-                        with v3.VCard(color="info", variant="tonal"):
-                            with v3.VCardText(classes="text-center pa-2"):
-                                html.Div("{{ pending_count }}", classes="text-h5")
-                                html.Div("Pending", classes="text-caption")
-                    with v3.VCol(cols=4):
-                        with v3.VCard(color="success", variant="tonal"):
-                            with v3.VCardText(classes="text-center pa-2"):
-                                html.Div("{{ completed_count }}", classes="text-h5")
-                                html.Div("Done", classes="text-caption")
-                    with v3.VCol(cols=4):
-                        with v3.VCard(color="error", variant="tonal"):
-                            with v3.VCardText(classes="text-center pa-2"):
-                                html.Div("{{ failed_count }}", classes="text-h5")
-                                html.Div("Failed", classes="text-caption")
+                with v3.VRow(align="center", dense=True):
+                    # Status counters
+                    with v3.VCol(cols=12, md=6):
+                        with v3.VRow(dense=True):
+                            with v3.VCol(cols=4):
+                                with v3.VCard(color="info", variant="tonal"):
+                                    with v3.VCardText(classes="text-center pa-2"):
+                                        html.Div(
+                                            "{{ pending_count }}", classes="text-h5"
+                                        )
+                                        html.Div("Pending", classes="text-caption")
+                            with v3.VCol(cols=4):
+                                with v3.VCard(color="success", variant="tonal"):
+                                    with v3.VCardText(classes="text-center pa-2"):
+                                        html.Div(
+                                            "{{ completed_count }}", classes="text-h5"
+                                        )
+                                        html.Div("Done", classes="text-caption")
+                            with v3.VCol(cols=4):
+                                with v3.VCard(color="error", variant="tonal"):
+                                    with v3.VCardText(classes="text-center pa-2"):
+                                        html.Div(
+                                            "{{ failed_count }}", classes="text-h5"
+                                        )
+                                        html.Div("Failed", classes="text-caption")
 
+                    # Action buttons
+                    with v3.VCol(cols=12, md=6):
+                        with v3.VRow(dense=True):
+                            with v3.VCol(cols=8):
+                                v3.VBtn(
+                                    "Run Batch",
+                                    color="primary",
+                                    size="large",
+                                    block=True,
+                                    disabled=("is_running || !batch_name",),
+                                    click=self._run_batch,
+                                )
+                            with v3.VCol(cols=4):
+                                v3.VBtn(
+                                    "Save Preset",
+                                    variant="outlined",
+                                    size="large",
+                                    block=True,
+                                    prepend_icon="mdi-content-save",
+                                    click=self._open_save_preset_dialog,
+                                )
+
+                # Progress bar and message
+                v3.VProgressLinear(
+                    v_if=("is_running",),
+                    model_value=("progress_percent",),
+                    color="primary",
+                    height=8,
+                    classes="mt-3",
+                )
                 v3.VAlert(
                     v_if=("progress_message",),
                     text=("progress_message",),
@@ -926,6 +1002,48 @@ class RunBatchPage:
                     density="compact",
                     classes="mt-3",
                 )
+
+        # Save preset dialog
+        with v3.VDialog(v_model=("show_save_preset_dialog",), max_width="500"):
+            with v3.VCard():
+                v3.VCardTitle("Save as Preset")
+                with v3.VCardText():
+                    v3.VTextField(
+                        v_model=("save_preset_name",),
+                        label="Preset Name",
+                        hint="Lowercase with underscores (e.g., my_preset)",
+                        persistent_hint=True,
+                        density="compact",
+                    )
+                    v3.VTextField(
+                        v_model=("save_preset_description",),
+                        label="Description",
+                        hint="Brief description of this preset",
+                        persistent_hint=True,
+                        density="compact",
+                        classes="mt-3",
+                    )
+                    v3.VAlert(
+                        v_if=("save_preset_message",),
+                        text=("save_preset_message",),
+                        type="success",
+                        density="compact",
+                        classes="mt-3",
+                    )
+                with v3.VCardActions():
+                    v3.VSpacer()
+                    v3.VBtn(
+                        "Cancel",
+                        variant="text",
+                        click=self._close_save_preset_dialog,
+                    )
+                    v3.VBtn(
+                        "Save",
+                        color="primary",
+                        variant="flat",
+                        click=self._save_preset,
+                        disabled=("!save_preset_name",),
+                    )
 
     def _build_log_card(self):
         """Build the log output card."""
@@ -1018,6 +1136,114 @@ class RunBatchPage:
             num_samples=int(self.state.num_samples),
         )
 
+    def _open_save_preset_dialog(self):
+        """Open the save preset dialog."""
+        # Pre-fill with batch name if available
+        self.state.save_preset_name = self.state.batch_name.lower().replace(" ", "_")
+        self.state.save_preset_description = self.state.batch_description
+        self.state.save_preset_message = ""
+        self.state.show_save_preset_dialog = True
+
+    def _close_save_preset_dialog(self):
+        """Close the save preset dialog."""
+        self.state.show_save_preset_dialog = False
+
+    def _save_preset(self):
+        """Save current parameters as a preset."""
+        from importlib import resources
+
+        preset_name = self.state.save_preset_name.lower().replace(" ", "_")
+        description = self.state.save_preset_description or f"Preset: {preset_name}"
+
+        # Determine inclusion type flags
+        inc_type = self.state.inclusion_type
+        is_sphere = inc_type == "sphere"
+        is_multi_cubes = inc_type == "multi_cubes"
+        is_cube_in_ellipsoid = inc_type == "cube_in_ellipsoid"
+
+        preset_content = f'''# {preset_name} Preset
+# {description}
+
+[preset]
+name = "{preset_name}"
+description = "{description}"
+base_config = "base_parameters.toml"
+default_num_samples = {int(self.state.num_samples)}
+
+[sweep.inclusion]
+# Material property ranges
+wave_speed_range = [{float(self.state.wave_speed_min)}, {float(self.state.wave_speed_max)}]
+density_range = [{float(self.state.density_min)}, {float(self.state.density_max)}]
+
+# Geometry ranges [min, max] for each axis
+scaling_range = [
+    [{float(self.state.scaling_x_min)}, {float(self.state.scaling_x_max)}],
+    [{float(self.state.scaling_y_min)}, {float(self.state.scaling_y_max)}],
+    [{float(self.state.scaling_z_min)}, {float(self.state.scaling_z_max)}],
+]
+
+# Inclusion behavior
+allow_rotation = {str(self.state.allow_rotation).lower()}
+allow_movement = {str(self.state.allow_movement).lower()}
+
+# Inclusion type
+is_sphere = {str(is_sphere).lower()}
+is_ellipsoid_of_revolution = false
+is_multi_cubes = {str(is_multi_cubes).lower()}
+is_cube_in_ellipsoid = {str(is_cube_in_ellipsoid).lower()}
+
+[sweep.cubes]
+quantity_range = [{int(self.state.cube_quantity_min)}, {int(self.state.cube_quantity_max)}]
+width_range = [{float(self.state.cube_width_min)}, {float(self.state.cube_width_max)}]
+
+[sweep.geometry]
+boundary_buffer = {float(self.state.boundary_buffer)}
+
+[fixed.sources]
+number = {int(self.state.source_count)}
+frequency = {float(self.state.all_source_frequency)}
+amplitude = {float(self.state.all_source_amplitude)}
+radius = {float(self.state.all_source_radius)}
+
+[fixed.outer_material]
+wave_speed = {float(self.state.outer_wave_speed)}
+density = {float(self.state.outer_density)}
+
+[fixed.mesh]
+grid_size = {float(self.state.grid_size)}
+box_size = {float(self.state.box_size)}
+
+[fixed.solver]
+polynomial_order = {int(self.state.polynomial_order)}
+number_of_timesteps = {int(self.state.number_of_timesteps)}
+
+[fixed.receivers]
+sensors_per_face = {int(self.state.sensors_per_face)}
+
+[fixed.output]
+image = {int(self.state.output_image_interval)}
+data = {int(self.state.output_data_interval)}
+points = {int(self.state.output_points_interval)}
+energy = {int(self.state.output_energy_interval)}
+'''
+
+        # Get the presets directory path
+        presets_pkg = resources.files("sbimaging.config.presets")
+        with resources.as_file(presets_pkg) as presets_dir:
+            preset_path = presets_dir / f"{preset_name}.toml"
+            with open(preset_path, "w") as f:
+                f.write(preset_content)
+            logger.info(f"Saved preset to {preset_path}")
+
+        self.state.save_preset_message = f"Saved preset: {preset_name}"
+
+        # Reload presets to include the new one
+        self._presets = self._load_presets()
+        preset_items = [{"title": "-- Start from scratch --", "value": ""}]
+        for name, preset in self._presets.items():
+            preset_items.append({"title": preset.name, "value": name})
+        self.state.preset_items = preset_items
+
     def _get_batch_output_dir(self) -> Path:
         """Compute the batch output directory."""
         base_dir = (
@@ -1026,16 +1252,118 @@ class RunBatchPage:
         batch_name = self.state.batch_name or "unnamed_batch"
         return base_dir / batch_name
 
+    def _save_batch_config(self, batch_dir: Path):
+        """Save the complete batch configuration to a TOML file."""
+        config = {
+            "batch": {
+                "name": self.state.batch_name,
+                "description": self.state.batch_description,
+                "num_samples": int(self.state.num_samples),
+                "inclusion_type": self.state.inclusion_type,
+            },
+            "sweep_parameters": {
+                "material": {
+                    "wave_speed_range": [
+                        float(self.state.wave_speed_min),
+                        float(self.state.wave_speed_max),
+                    ],
+                    "density_range": [
+                        float(self.state.density_min),
+                        float(self.state.density_max),
+                    ],
+                },
+                "geometry": {
+                    "scaling_x_range": [
+                        float(self.state.scaling_x_min),
+                        float(self.state.scaling_x_max),
+                    ],
+                    "scaling_y_range": [
+                        float(self.state.scaling_y_min),
+                        float(self.state.scaling_y_max),
+                    ],
+                    "scaling_z_range": [
+                        float(self.state.scaling_z_min),
+                        float(self.state.scaling_z_max),
+                    ],
+                    "allow_rotation": self.state.allow_rotation,
+                    "allow_movement": self.state.allow_movement,
+                    "boundary_buffer": float(self.state.boundary_buffer),
+                },
+                "cubes": {
+                    "quantity_range": [
+                        int(self.state.cube_quantity_min),
+                        int(self.state.cube_quantity_max),
+                    ],
+                    "width_range": [
+                        float(self.state.cube_width_min),
+                        float(self.state.cube_width_max),
+                    ],
+                },
+            },
+            "fixed_parameters": {
+                "sources": {
+                    "number": int(self.state.source_count),
+                    "frequency": float(self.state.all_source_frequency),
+                    "amplitude": float(self.state.all_source_amplitude),
+                    "radius": float(self.state.all_source_radius),
+                    "centers": [s["center"] for s in self.state.sources],
+                },
+                "outer_material": {
+                    "wave_speed": float(self.state.outer_wave_speed),
+                    "density": float(self.state.outer_density),
+                },
+                "mesh": {
+                    "grid_size": float(self.state.grid_size),
+                    "box_size": float(self.state.box_size),
+                    "inclusion_center": [
+                        float(self.state.inclusion_center_x),
+                        float(self.state.inclusion_center_y),
+                        float(self.state.inclusion_center_z),
+                    ],
+                },
+                "solver": {
+                    "polynomial_order": int(self.state.polynomial_order),
+                    "number_of_timesteps": int(self.state.number_of_timesteps),
+                },
+                "receivers": {
+                    "sensors_per_face": int(self.state.sensors_per_face),
+                },
+                "output_intervals": {
+                    "image": int(self.state.output_image_interval),
+                    "data": int(self.state.output_data_interval),
+                    "points": int(self.state.output_points_interval),
+                    "energy": int(self.state.output_energy_interval),
+                },
+            },
+        }
+
+        config_path = batch_dir / "batch_config.toml"
+        with open(config_path, "w") as f:
+            toml.dump(config, f)
+        logger.info(f"Saved batch configuration to {config_path}")
+
     def _run_batch(self):
-        """Execute the simulation batch."""
+        """Start the simulation batch execution."""
+        asyncio.create_task(self._run_batch_async())
+
+    async def _run_batch_async(self):
+        """Execute the simulation batch asynchronously."""
         batch_dir = self._get_batch_output_dir()
         if not batch_dir.exists():
             batch_dir.mkdir(parents=True, exist_ok=True)
             self._log(f"Created batch directory: {batch_dir}")
 
+        # Save batch configuration
+        self._save_batch_config(batch_dir)
+
         self.state.is_running = True
         self.state.progress_message = "Starting batch..."
         self.state.log_messages = []
+        self.state.pending_count = 0
+        self.state.completed_count = 0
+        self.state.failed_count = 0
+        self.state.total_simulations = 0
+        self.state.progress_percent = 0
 
         self._log(f"Batch: {self.state.batch_name}")
         if self.state.batch_description:
@@ -1080,29 +1408,97 @@ class RunBatchPage:
             f"Solver: poly_order={self.state.polynomial_order}, timesteps={self.state.number_of_timesteps}"
         )
 
+        # Allow UI to update before starting heavy computation
+        await asyncio.sleep(0)
+
         try:
             self.state.progress_message = "Scanning for pending simulations..."
+            await asyncio.sleep(0)
 
             planner = BatchPlanner(batch_dir)
             planner.compute_mesh_hashes()
             pending = planner.find_pending_simulations()
             self.state.pending_count = len(pending)
             self._log(f"Found {len(pending)} existing pending simulations")
+            await asyncio.sleep(0)
 
             self.state.progress_message = "Running simulations..."
-            completed, failed = run_batch(
-                batch_dir=batch_dir,
-                base_config_path=base_config,
-                num_samples=num_samples,
-                mesh_file=mesh_file,
-                parameter_space=parameter_space,
-                geometry_type=self.state.inclusion_type,
-                simulation_config=simulation_config,
+
+            # Get the event loop and server for state updates
+            loop = asyncio.get_event_loop()
+            server = self.server
+
+            def progress_callback(pending: int, completed: int, failed: int):
+                """Update UI state from batch executor (called from thread pool)."""
+                total = self.state.total_simulations
+                if total > 0:
+                    # 10% for mesh generation, 90% for simulations
+                    sim_progress = (completed + failed) / total * 90
+                    percent = 10 + sim_progress
+                else:
+                    percent = 10
+
+                def update_state():
+                    self.state.pending_count = pending
+                    self.state.completed_count = completed
+                    self.state.failed_count = failed
+                    self.state.progress_percent = int(percent)
+                    self.state.progress_message = (
+                        f"Running simulations... ({completed + failed}/{total})"
+                    )
+                    # Force state push to client
+                    server.state.flush()
+
+                # Schedule state update on the main event loop
+                loop.call_soon_threadsafe(update_state)
+
+            def mesh_progress_callback(generated: int, total: int):
+                """Update UI during mesh generation (called from thread pool)."""
+                # Mesh generation is 10% of total progress
+                percent = (generated / total * 10) if total > 0 else 0
+
+                def update_state():
+                    self.state.progress_message = (
+                        f"Generating meshes... ({generated}/{total})"
+                    )
+                    self.state.progress_percent = int(percent)
+                    server.state.flush()
+
+                loop.call_soon_threadsafe(update_state)
+
+            def total_simulations_callback(total: int):
+                """Set total simulations count (called from thread pool)."""
+
+                def update_state():
+                    self.state.total_simulations = total
+                    self.state.pending_count = total
+                    self.state.progress_message = f"Running simulations... (0/{total})"
+                    self.state.progress_percent = 10
+                    server.state.flush()
+
+                loop.call_soon_threadsafe(update_state)
+
+            # Run the batch in a thread pool to avoid blocking the event loop
+            completed, failed = await loop.run_in_executor(
+                None,
+                lambda: run_batch(
+                    batch_dir=batch_dir,
+                    base_config_path=base_config,
+                    num_samples=num_samples,
+                    mesh_file=mesh_file,
+                    parameter_space=parameter_space,
+                    geometry_type=self.state.inclusion_type,
+                    simulation_config=simulation_config,
+                    progress_callback=progress_callback,
+                    mesh_progress_callback=mesh_progress_callback,
+                    total_simulations_callback=total_simulations_callback,
+                ),
             )
 
             self.state.completed_count = completed
             self.state.failed_count = failed
             self.state.pending_count = 0
+            self.state.progress_percent = 100
             self.state.progress_message = (
                 f"Complete: {completed} succeeded, {failed} failed"
             )

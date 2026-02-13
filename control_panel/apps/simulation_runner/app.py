@@ -7,6 +7,7 @@ from trame.app import get_server
 from trame.ui.vuetify3 import SinglePageLayout
 from trame.widgets import vuetify3 as v3
 
+from apps.simulation_runner.pages.batch_parameters import BatchParametersPage
 from apps.simulation_runner.pages.run_batch import RunBatchPage
 from apps.simulation_runner.pages.visualize_batch import VisualizeBatchPage
 from sbimaging.logging import configure_logging, get_logger
@@ -17,6 +18,7 @@ logger = get_logger(__name__)
 PAGES = [
     {"title": "Run Simulation Batch", "value": "run"},
     {"title": "Visualize Simulation Batch", "value": "visualize"},
+    {"title": "Batch Parameters", "value": "parameters"},
 ]
 
 
@@ -31,6 +33,7 @@ class SimulationApp:
         # Initialize pages
         self.run_batch_page = RunBatchPage(self.server)
         self.visualize_batch_page = VisualizeBatchPage(self.server)
+        self.batch_parameters_page = BatchParametersPage(self.server)
 
         self._setup_state()
         self._setup_ui()
@@ -43,13 +46,30 @@ class SimulationApp:
     def _setup_ui(self):
         """Build the user interface."""
         with SinglePageLayout(self.server) as layout:
-            layout.title.set_text("Simulation Batch Manager")
+            # Hide the title and hamburger menu
+            layout.title.hide()
+            layout.icon.hide()
 
             with layout.toolbar:
-                # Page navigation tabs
-                with v3.VTabs(v_model=("current_page",), density="compact"):
-                    v3.VTab(value="run", text="Run Simulation Batch")
-                    v3.VTab(value="visualize", text="Visualize Simulation Batch")
+                v3.VSpacer()
+
+                # Page navigation tabs (centered)
+                with v3.VTabs(v_model=("current_page",)):
+                    v3.VTab(
+                        value="run",
+                        text="Run Simulation Batch",
+                        classes="text-h6 px-8",
+                    )
+                    v3.VTab(
+                        value="visualize",
+                        text="Visualize Simulation Batch",
+                        classes="text-h6 px-8",
+                    )
+                    v3.VTab(
+                        value="parameters",
+                        text="Batch Parameters",
+                        classes="text-h6 px-8",
+                    )
 
                 v3.VSpacer()
 
@@ -57,6 +77,7 @@ class SimulationApp:
                 with v3.VContainer(
                     v_show=("current_page === 'run'",),
                     classes="d-flex pa-0",
+                    style="position: absolute; right: 16px;",
                 ):
                     self.run_batch_page.build_toolbar_actions()
 
@@ -68,6 +89,9 @@ class SimulationApp:
 
                     with v3.VWindowItem(value="visualize"):
                         self.visualize_batch_page.build_ui()
+
+                    with v3.VWindowItem(value="parameters"):
+                        self.batch_parameters_page.build_ui()
 
 
 def main():

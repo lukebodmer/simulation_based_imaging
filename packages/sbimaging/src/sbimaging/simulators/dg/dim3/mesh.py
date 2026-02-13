@@ -439,7 +439,9 @@ class MeshLoader:
         self._logger = get_logger(__name__)
 
         if not gmsh.isInitialized():
-            gmsh.initialize()
+            # interruptible=False prevents gmsh from setting up signal handlers,
+            # which is required when running in a thread pool (not main thread)
+            gmsh.initialize(interruptible=False)
 
         gmsh.option.setNumber("General.Terminal", 0)
         self._logger.info(f"Loading mesh from {mesh_file}")

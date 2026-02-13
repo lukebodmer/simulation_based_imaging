@@ -5,6 +5,7 @@ calculation across batches of simulations.
 """
 
 import hashlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -276,11 +277,14 @@ class BatchPlanner:
     def generate_missing_meshes(
         self,
         geometry_type: GeometryType = GeometryType.ELLIPSOID,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> int:
         """Generate meshes for configurations that don't have them.
 
         Args:
             geometry_type: Type of geometry to generate.
+            progress_callback: Optional callback for progress updates.
+                Signature: (generated: int, total: int) -> None
 
         Returns:
             Number of meshes generated.
@@ -289,6 +293,7 @@ class BatchPlanner:
             self.compute_mesh_hashes()
 
         generated = 0
+        total = len(self._mesh_info)
 
         for mesh_hash, info in self._mesh_info.items():
             mesh_dir = self.mesh_dir / mesh_hash
@@ -300,6 +305,9 @@ class BatchPlanner:
                     diameter = self._load_mesh_diameter(mesh_hash)
                     if diameter:
                         info.smallest_diameter = diameter
+                generated += 1
+                if progress_callback:
+                    progress_callback(generated, total)
                 continue
 
             self._logger.info(f"Generating mesh {mesh_hash}")
@@ -314,6 +322,9 @@ class BatchPlanner:
             info.smallest_diameter = diameter
             self._save_mesh_metadata(mesh_hash, diameter)
             generated += 1
+
+            if progress_callback:
+                progress_callback(generated, total)
 
         self._logger.info(f"Generated {generated} meshes")
         return generated

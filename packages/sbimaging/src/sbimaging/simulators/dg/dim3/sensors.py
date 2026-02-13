@@ -48,7 +48,9 @@ class SensorArray:
         self.num_sensors = len(locations)
 
         if not gmsh.isInitialized():
-            gmsh.initialize()
+            # interruptible=False prevents gmsh from setting up signal handlers,
+            # which is required when running in a thread pool (not main thread)
+            gmsh.initialize(interruptible=False)
 
         self._element_offset, _ = gmsh.model.mesh.getElementsByType(4)
         self._precompute_interpolation()
@@ -162,15 +164,21 @@ def generate_grid_sensors(
 
     Args:
         box_size: Size of cubic domain.
-        sensors_per_face: Number of sensors along each dimension per face.
+        sensors_per_face: Total number of sensors per face (must be a perfect square).
         exclude_regions: List of (center, radius) tuples for excluded regions.
 
     Returns:
         List of (x, y, z) sensor coordinates.
     """
+    # sensors_per_face should be a perfect square (e.g., 25 = 5x5 grid)
+    grid_n = int(np.sqrt(sensors_per_face))
+    if grid_n * grid_n != sensors_per_face:
+        # If not a perfect square, use the nearest square root
+        grid_n = max(1, round(np.sqrt(sensors_per_face)))
+
     sensors = []
-    margin = box_size / (2 * sensors_per_face)
-    coords = np.linspace(margin, box_size - margin, sensors_per_face)
+    margin = box_size * 0.2  # 20% margin from edges
+    coords = np.linspace(margin, box_size - margin, grid_n)
 
     for x in coords:
         for y in coords:

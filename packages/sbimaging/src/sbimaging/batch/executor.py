@@ -52,6 +52,7 @@ class BatchExecutor:
         pending: list[str],
         global_dt: float,
         mesh_file_resolver: Callable | None = None,
+        progress_callback: Callable[[int, int, int], None] | None = None,
     ) -> tuple[int, int]:
         """Run all pending simulations.
 
@@ -60,6 +61,8 @@ class BatchExecutor:
             global_dt: Global time step to use for all simulations.
             mesh_file_resolver: Optional function to resolve mesh file paths.
                 Signature: (sim_hash: str) -> Path
+            progress_callback: Optional callback for progress updates.
+                Signature: (pending: int, completed: int, failed: int) -> None
 
         Returns:
             Tuple of (completed_count, failed_count).
@@ -67,11 +70,15 @@ class BatchExecutor:
         self._logger.info(f"Running {len(pending)} simulations")
         self._completed = 0
         self._failed = 0
+        total = len(pending)
 
         start_time = time.time()
 
+        if progress_callback:
+            progress_callback(total, 0, 0)
+
         for i, sim_hash in enumerate(pending):
-            self._logger.info(f"[{i + 1}/{len(pending)}] Running simulation {sim_hash}")
+            self._logger.info(f"[{i + 1}/{total}] Running simulation {sim_hash}")
 
             try:
                 self._run_single(sim_hash, global_dt, mesh_file_resolver)
@@ -79,6 +86,10 @@ class BatchExecutor:
             except Exception as e:
                 self._logger.error(f"Simulation {sim_hash} failed: {e}")
                 self._failed += 1
+
+            if progress_callback:
+                remaining = total - (self._completed + self._failed)
+                progress_callback(remaining, self._completed, self._failed)
 
         elapsed = time.time() - start_time
         self._logger.info(
@@ -147,6 +158,7 @@ class BatchExecutor:
             config=config,
             output_dir=output_dir,
             mesh_file=mesh_file,
+            global_dt=global_dt,
         )
         runner.setup()
 
@@ -216,6 +228,9 @@ def run_batch(
     parameter_space: ParameterSpace | None = None,
     geometry_type: str = "ellipsoid",
     simulation_config: UISimulationConfig | None = None,
+    progress_callback: Callable[[int, int, int], None] | None = None,
+    mesh_progress_callback: Callable[[int, int], None] | None = None,
+    total_simulations_callback: Callable[[int], None] | None = None,
 ) -> tuple[int, int]:
     """Run a batch of simulations.
 
@@ -230,6 +245,12 @@ def run_batch(
         geometry_type: Type of geometry to generate ("ellipsoid", "sphere",
             "multi_cubes", "cube_in_ellipsoid").
         simulation_config: Optional SimulationConfig with fixed parameter overrides.
+        progress_callback: Optional callback for progress updates.
+            Signature: (pending: int, completed: int, failed: int) -> None
+        mesh_progress_callback: Optional callback for mesh generation progress.
+            Signature: (generated: int, total: int) -> None
+        total_simulations_callback: Optional callback to report total simulations.
+            Signature: (total: int) -> None
 
     Returns:
         Tuple of (completed_count, failed_count).
@@ -281,7 +302,10 @@ def run_batch(
                 loader.close()
         else:
             logger.info("Generating meshes for unique configurations")
-            planner.generate_missing_meshes(geometry_type=geometry_type_enum)
+            planner.generate_missing_meshes(
+                geometry_type=geometry_type_enum,
+                progress_callback=mesh_progress_callback,
+            )
 
         global_dt = planner.compute_global_timestep()
         planner.save_metadata()
@@ -299,9 +323,14 @@ def run_batch(
             return planner.get_mesh_file(mesh_hash)
         return None
 
+    # Report total simulations count
+    if total_simulations_callback:
+        total_simulations_callback(len(pending))
+
     executor = BatchExecutor(batch_dir)
     return executor.run_all(
         pending=pending,
         global_dt=global_dt,
         mesh_file_resolver=mesh_resolver,
+        progress_callback=progress_callback,
     )

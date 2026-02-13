@@ -131,7 +131,9 @@ class MeshGenerator:
         if gmsh.isInitialized():
             gmsh.finalize()
 
-        gmsh.initialize()
+        # interruptible=False prevents gmsh from setting up signal handlers,
+        # which is required when running in a thread pool (not main thread)
+        gmsh.initialize(interruptible=False)
         gmsh.option.setNumber("General.Terminal", 0)
 
         variation = self.config.grid_variation
