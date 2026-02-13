@@ -1,0 +1,33 @@
+# Sphere Sweep Preset
+# Spherical inclusions with varying sizes and material properties.
+
+[preset]
+name = "sphere_sweep"
+description = "Spherical inclusions with varying radius and material properties"
+base_config = "base_parameters.toml"
+default_num_samples = 100
+
+[sweep.inclusion]
+# Material property ranges
+wave_speed_range = [1.5, 4.0]
+density_range = [1.5, 4.0]
+
+# For spheres, all axes use the same value (first range is used)
+scaling_range = [
+    [0.1, 0.35],  # radius range
+    [0.1, 0.35],  # ignored for sphere
+    [0.1, 0.35],  # ignored for sphere
+]
+
+# Inclusion behavior
+allow_rotation = false
+allow_movement = false
+
+# Inclusion type
+is_sphere = true
+is_ellipsoid_of_revolution = false
+is_multi_cubes = false
+is_cube_in_ellipsoid = false
+
+[sweep.geometry]
+boundary_buffer = 0.05

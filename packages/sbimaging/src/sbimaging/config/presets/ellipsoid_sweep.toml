@@ -1,0 +1,33 @@
+# Ellipsoid Sweep Preset
+# Pure ellipsoid inclusions with varying material properties.
+
+[preset]
+name = "ellipsoid_sweep"
+description = "Ellipsoid inclusions with varying material properties and orientations"
+base_config = "base_parameters.toml"
+default_num_samples = 100
+
+[sweep.inclusion]
+# Material property ranges
+wave_speed_range = [1.5, 4.0]
+density_range = [1.5, 4.0]
+
+# Geometry ranges [min, max] for each axis
+scaling_range = [
+    [0.1, 0.3],   # x-axis
+    [0.1, 0.3],   # y-axis
+    [0.1, 0.3],   # z-axis
+]
+
+# Inclusion behavior
+allow_rotation = true
+allow_movement = false
+
+# Inclusion type
+is_sphere = false
+is_ellipsoid_of_revolution = false
+is_multi_cubes = false
+is_cube_in_ellipsoid = false
+
+[sweep.geometry]
+boundary_buffer = 0.05

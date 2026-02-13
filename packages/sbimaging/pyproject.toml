@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sbimaging"
+version = "0.1.0"
+description = "Simulation-based imaging: numerical solvers and inverse models"
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Luke Bodmer" }]
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=1.26.0",
+    "scipy>=1.11.0",
+]
+
+[project.optional-dependencies]
+gpu = ["cupy-cuda12x>=13.0.0"]
+meshing = ["gmsh>=4.12.0"]
+visualization = ["pyvista>=0.43.0", "matplotlib>=3.8.0"]
+dev = ["pytest>=8.0.0", "ruff>=0.3.0", "pyright>=1.1.350"]
+all = ["sbimaging[gpu,meshing,visualization,dev]"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

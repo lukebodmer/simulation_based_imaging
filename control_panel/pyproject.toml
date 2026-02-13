@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sbi-control-panel"
+version = "0.1.0"
+description = "Trame control panel for simulation-based imaging"
+requires-python = ">=3.12"
+dependencies = [
+    "sbimaging",
+    "trame>=3.0",
+    "trame-vuetify>=2.0",
+    "trame-vtk>=2.0",
+    "pyvista>=0.43",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["apps"]

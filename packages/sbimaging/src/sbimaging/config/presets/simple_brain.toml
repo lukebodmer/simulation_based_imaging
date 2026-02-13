@@ -1,0 +1,67 @@
+# Simple Brain Preset
+# Ellipsoid inclusion with cube inside, mimicking simplified brain geometry.
+
+[preset]
+name = "simple_brain"
+description = "Ellipsoid inclusion with embedded cube, simplified brain-like geometry"
+base_config = "base_parameters.toml"
+default_num_samples = 500
+
+[sweep.inclusion]
+# Material property ranges
+wave_speed_range = [4.0, 4.0]
+density_range = [4.0, 4.0]
+
+# Geometry ranges [min, max] for each axis
+scaling_range = [
+    [0.125, 0.375],  # x-axis
+    [0.125, 0.375],  # y-axis
+    [0.125, 0.375],  # z-axis
+]
+
+# Inclusion behavior
+allow_rotation = false
+allow_movement = false
+
+# Inclusion type (only one should be true)
+is_sphere = false
+is_ellipsoid_of_revolution = false
+is_multi_cubes = false
+is_cube_in_ellipsoid = true
+
+[sweep.cubes]
+quantity_range = [1, 1]
+width_range = [0.15, 0.3]
+
+[sweep.geometry]
+boundary_buffer = 0.05
+
+# Optional fixed parameters (override defaults)
+# Uncomment sections below to customize fixed parameters for this preset
+
+# [fixed.sources]
+# number = 6
+# frequency = 3.0
+# amplitude = 1.0
+# radius = 0.05
+
+# [fixed.outer_material]
+# wave_speed = 2.0
+# density = 2.0
+
+# [fixed.mesh]
+# grid_size = 0.04
+# box_size = 1.0
+
+# [fixed.solver]
+# polynomial_order = 1
+# number_of_timesteps = 10000
+
+# [fixed.receivers]
+# sensors_per_face = 25
+
+# [fixed.output]
+# image = 1000
+# data = 1000
+# points = 10
+# energy = 500

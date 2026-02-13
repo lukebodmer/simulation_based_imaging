@@ -1,0 +1,37 @@
+# Multi-Cube Preset
+# Multiple cubic inclusions with varying counts and sizes.
+
+[preset]
+name = "multi_cube"
+description = "Multiple cubic inclusions for testing complex geometries"
+base_config = "base_parameters.toml"
+default_num_samples = 200
+
+[sweep.inclusion]
+# Material property ranges
+wave_speed_range = [2.0, 5.0]
+density_range = [2.0, 5.0]
+
+# Not used for multi-cube, but required
+scaling_range = [
+    [0.1, 0.2],
+    [0.1, 0.2],
+    [0.1, 0.2],
+]
+
+# Inclusion behavior
+allow_rotation = false
+allow_movement = false
+
+# Inclusion type
+is_sphere = false
+is_ellipsoid_of_revolution = false
+is_multi_cubes = true
+is_cube_in_ellipsoid = false
+
+[sweep.cubes]
+quantity_range = [1, 4]
+width_range = [0.08, 0.2]
+
+[sweep.geometry]
+boundary_buffer = 0.05

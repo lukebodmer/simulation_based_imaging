@@ -1,0 +1,13 @@
+# Root pyproject.toml for workspace-level tooling configuration
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "basic"
+include = ["packages/sbimaging/src", "backend", "visualizations"]
+exclude = ["**/node_modules", "**/__pycache__", ".venv", "old_wave_map_code"]
+
+[tool.pytest.ini_options]
+testpaths = ["packages/sbimaging/tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"

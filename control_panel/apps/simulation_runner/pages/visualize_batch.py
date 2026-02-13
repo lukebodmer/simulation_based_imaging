@@ -1,0 +1,610 @@
+"""Visualize Simulation Batch page."""
+
+import pickle
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pyvista as pv
+import toml
+from pyvista.trame.ui import plotter_ui
+from trame.widgets import matplotlib as mpl_widgets
+from trame.widgets import vuetify3 as v3
+
+from sbimaging.logging import get_logger
+
+logger = get_logger(__name__)
+
+DEFAULT_DATA_DIR = Path("/data/simulations")
+
+# PyVista offscreen rendering for trame
+pv.OFF_SCREEN = True
+
+
+class VisualizeBatchPage:
+    """Page for visualizing completed simulation batches."""
+
+    def __init__(self, server):
+        self.server = server
+        self.state = server.state
+        self.ctrl = server.controller
+
+        # PyVista plotters
+        self.plotter_sim = pv.Plotter()  # Simulation pressure data
+        self.plotter_wave = pv.Plotter()  # Wave speed visualization
+
+        # Matplotlib figure widgets (will be set during UI build)
+        self.sensor_matrix_widget = None
+        self.energy_widget = None
+
+        # Data storage
+        self.mesh_data = None
+        self.timestep_data = None
+        self.sensor_data = None
+        self.energy_data = None
+
+        self._setup_state()
+
+    def _setup_state(self):
+        """Initialize state variables for this page."""
+        self.state.available_batches = []
+        self.state.selected_batch = ""
+        self.state.simulation_list = []
+        self.state.selected_simulation = ""
+        self.state.timestep_list = []
+        self.state.selected_timestep = ""
+        self.state.simulation_parameters_dict = {}
+        self.state.viz_active_tab = "wave"
+
+        # Refresh batch list on init
+        self._refresh_batch_list()
+
+        # Register state change handlers
+        self.state.change("selected_batch")(self._on_batch_selected)
+        self.state.change("selected_simulation")(self._on_simulation_selected)
+        self.state.change("selected_timestep")(self._on_timestep_selected)
+
+    def _refresh_batch_list(self):
+        """Scan /data/simulations for available batches."""
+        batches = []
+        if DEFAULT_DATA_DIR.exists():
+            for item in sorted(DEFAULT_DATA_DIR.iterdir()):
+                if item.is_dir():
+                    has_params = (item / "parameter_files").exists()
+                    has_sims = (item / "simulations").exists()
+                    if has_params or has_sims:
+                        batches.append({"title": item.name, "value": item.name})
+
+        self.state.available_batches = batches
+        logger.info(f"Found {len(batches)} simulation batches")
+
+    def _on_batch_selected(self, selected_batch, **kwargs):
+        """Handle batch selection - refresh simulation list."""
+        self.state.simulation_list = []
+        self.state.selected_simulation = ""
+        self.state.timestep_list = []
+        self.state.selected_timestep = ""
+        self.state.simulation_parameters_dict = {}
+
+        if not selected_batch:
+            return
+
+        sim_dir = DEFAULT_DATA_DIR / selected_batch / "simulations"
+        if sim_dir.exists():
+            sims = [
+                {"title": d.name, "value": d.name}
+                for d in sorted(sim_dir.iterdir())
+                if d.is_dir()
+            ]
+            self.state.simulation_list = sims
+            logger.info(f"Found {len(sims)} simulations in batch {selected_batch}")
+
+    def _on_simulation_selected(self, selected_simulation, **kwargs):
+        """Handle simulation selection - load parameters and timesteps."""
+        self.state.timestep_list = []
+        self.state.selected_timestep = ""
+        self.state.simulation_parameters_dict = {}
+
+        if not selected_simulation or not self.state.selected_batch:
+            return
+
+        batch_name = self.state.selected_batch
+
+        # Load simulation parameters
+        param_file = (
+            DEFAULT_DATA_DIR
+            / batch_name
+            / "parameter_files"
+            / f"{selected_simulation}.toml"
+        )
+        if param_file.exists():
+            try:
+                raw_params = toml.load(param_file)
+                sim_params = {
+                    section: {k: self._prettify_value(v) for k, v in content.items()}
+                    for section, content in raw_params.items()
+                }
+                self.state.simulation_parameters_dict = sim_params
+            except Exception as e:
+                logger.error(f"Failed to load parameters: {e}")
+                self.state.simulation_parameters_dict = {"Error": {"message": str(e)}}
+
+        # Load timestep list
+        sim_dir = DEFAULT_DATA_DIR / batch_name / "simulations" / selected_simulation
+        data_dir = sim_dir / "data"
+        if data_dir.exists():
+            timesteps = []
+            for f in sorted(data_dir.glob("*.pkl")):
+                try:
+                    display_num = str(int(f.stem.split("_t")[-1]))
+                except (ValueError, IndexError):
+                    display_num = f.name
+                timesteps.append({"title": display_num, "value": f.name})
+            # Sort numerically
+            timesteps.sort(key=lambda x: int(x["title"]) if x["title"].isdigit() else 0)
+            self.state.timestep_list = timesteps
+            logger.info(f"Found {len(timesteps)} timesteps")
+
+        # Load sensor and energy data (these are saved once at end of simulation)
+        self._load_sensor_data(sim_dir)
+        self._load_energy_data(sim_dir)
+
+    def _load_sensor_data(self, sim_dir: Path):
+        """Load sensor data from simulation directory."""
+        sensor_file = sim_dir / "sensor_data.pkl"
+        if sensor_file.exists():
+            try:
+                with open(sensor_file, "rb") as f:
+                    self.sensor_data = pickle.load(f)
+                logger.info(f"Loaded sensor data from {sensor_file}")
+            except Exception as e:
+                logger.error(f"Failed to load sensor data: {e}")
+                self.sensor_data = None
+        else:
+            self.sensor_data = None
+
+    def _load_energy_data(self, sim_dir: Path):
+        """Load energy data from simulation directory."""
+        energy_file = sim_dir / "energy_data.pkl"
+        if energy_file.exists():
+            try:
+                with open(energy_file, "rb") as f:
+                    self.energy_data = pickle.load(f)
+                logger.info(f"Loaded energy data from {energy_file}")
+            except Exception as e:
+                logger.error(f"Failed to load energy data: {e}")
+                self.energy_data = None
+        else:
+            self.energy_data = None
+
+    def _on_timestep_selected(self, selected_timestep, **kwargs):
+        """Handle timestep selection - load and visualize data."""
+        if not selected_timestep:
+            return
+
+        batch_name = self.state.selected_batch
+        sim_hash = self.state.selected_simulation
+        if not batch_name or not sim_hash:
+            return
+
+        sim_dir = DEFAULT_DATA_DIR / batch_name / "simulations" / sim_hash
+        data_dir = sim_dir / "data"
+
+        # Load timestep data
+        timestep_path = data_dir / selected_timestep
+        try:
+            with open(timestep_path, "rb") as f:
+                self.timestep_data = pickle.load(f)
+            logger.info(f"Loaded timestep data from {timestep_path}")
+        except Exception as e:
+            logger.error(f"Failed to load timestep data: {e}")
+            return
+
+        # Load mesh data
+        self._load_mesh_data(batch_name, sim_hash)
+
+        # Update visualizations
+        self._update_visualizations()
+
+    def _load_mesh_data(self, batch_name: str, sim_hash: str):
+        """Load mesh data for the simulation."""
+        batch_dir = DEFAULT_DATA_DIR / batch_name
+        sim_dir = batch_dir / "simulations" / sim_hash
+
+        # First try to load from simulation output directory
+        sim_mesh_file = sim_dir / "mesh.pkl"
+        if sim_mesh_file.exists():
+            try:
+                with open(sim_mesh_file, "rb") as f:
+                    self.mesh_data = pickle.load(f)
+                logger.info(f"Loaded mesh data from {sim_mesh_file}")
+                return
+            except Exception as e:
+                logger.warning(f"Failed to load mesh from sim dir: {e}")
+
+        # Fall back to looking up mesh hash from parameter file
+        try:
+            from sbimaging.batch.planner import BatchPlanner
+
+            planner = BatchPlanner(batch_dir)
+            mesh_hash = planner.get_mesh_hash_for_simulation(sim_hash)
+
+            if mesh_hash is None:
+                logger.error(f"No mesh hash found for simulation {sim_hash}")
+                return
+
+            mesh_file = batch_dir / "meshes" / mesh_hash / "mesh.pkl"
+            if mesh_file.exists():
+                with open(mesh_file, "rb") as f:
+                    self.mesh_data = pickle.load(f)
+                logger.info(f"Loaded mesh data from {mesh_file}")
+            else:
+                logger.error(f"Mesh pickle not found: {mesh_file}")
+
+        except Exception as e:
+            logger.error(f"Failed to load mesh data: {e}")
+
+    def _update_visualizations(self):
+        """Update all visualizations with current data."""
+        if self.timestep_data is None:
+            return
+
+        # Update PyVista plotters
+        self._update_wave_speed_plot()
+        self._update_simulation_plot()
+
+        # Update matplotlib plots
+        self._update_sensor_plot()
+        self._update_energy_plot()
+
+    def _update_wave_speed_plot(self):
+        """Update the wave speed visualization."""
+        if self.mesh_data is None:
+            return
+
+        self.plotter_wave.clear()
+
+        try:
+            # Build tetrahedral grid from mesh
+            if hasattr(self.mesh_data, "num_cells"):
+                num_cells = self.mesh_data.num_cells
+                cell_to_vertices = self._to_numpy(self.mesh_data.cell_to_vertices)
+                vertex_coordinates = self._to_numpy(self.mesh_data.vertex_coordinates)
+                speed = self._to_numpy(self.mesh_data.speed[0, :])
+            else:
+                num_cells = self.mesh_data["num_cells"]
+                cell_to_vertices = self._to_numpy(self.mesh_data["cell_to_vertices"])
+                vertex_coordinates = self._to_numpy(
+                    self.mesh_data["vertex_coordinates"]
+                )
+                speed = self._to_numpy(self.mesh_data["speed_per_cell"])
+
+            cell_conn = np.hstack(
+                [np.full((num_cells, 1), 4), cell_to_vertices]
+            ).ravel()
+            cell_types = np.full(num_cells, pv.CellType.TETRA, dtype=np.uint8)
+
+            grid = pv.UnstructuredGrid(cell_conn, cell_types, vertex_coordinates)
+            grid.cell_data["speed"] = speed
+
+            # Create uniform grid for volume rendering
+            bounds = grid.bounds
+            resolution = (50, 50, 50)
+            nx, ny, nz = resolution
+            image = pv.ImageData()
+            image.dimensions = resolution
+            image.origin = (bounds[0], bounds[2], bounds[4])
+            image.spacing = (
+                (bounds[1] - bounds[0]) / (nx - 1),
+                (bounds[3] - bounds[2]) / (ny - 1),
+                (bounds[5] - bounds[4]) / (nz - 1),
+            )
+
+            sampled = image.sample(grid)
+            self.plotter_wave.add_volume(
+                sampled,
+                scalars="speed",
+                cmap="viridis",
+                opacity="sigmoid",
+            )
+            self.plotter_wave.show_grid()
+            self.plotter_wave.render()
+
+        except Exception as e:
+            logger.error(f"Failed to update wave speed plot: {e}")
+
+    def _update_simulation_plot(self):
+        """Update the simulation pressure visualization."""
+        if self.mesh_data is None or self.timestep_data is None:
+            return
+
+        self.plotter_sim.clear()
+
+        try:
+            # Get node coordinates
+            if hasattr(self.mesh_data, "x"):
+                x = self._to_numpy(self.mesh_data.x.ravel(order="F"))
+                y = self._to_numpy(self.mesh_data.y.ravel(order="F"))
+                z = self._to_numpy(self.mesh_data.z.ravel(order="F"))
+            else:
+                x = self._to_numpy(self.mesh_data["x"].ravel(order="F"))
+                y = self._to_numpy(self.mesh_data["y"].ravel(order="F"))
+                z = self._to_numpy(self.mesh_data["z"].ravel(order="F"))
+
+            node_coordinates = np.column_stack((x, y, z))
+
+            # Get pressure field
+            fields = self.timestep_data.get("fields", {})
+            if "p" in fields:
+                pressure = self._to_numpy(fields["p"]).ravel(order="F")
+
+                self.plotter_sim.add_points(
+                    node_coordinates,
+                    scalars=pressure,
+                    cmap="seismic",
+                    opacity=[0.9, 0.7, 0.5, 0.5, 0, 0.5, 0.5, 0.7, 0.9],
+                    clim=[-1.0, 1.0],
+                    point_size=8,
+                    render_points_as_spheres=True,
+                )
+
+            # Add sensors if available
+            sensor_coords = self.timestep_data.get("sensor_coordinates", [])
+            if sensor_coords:
+                sensor_points = np.array(sensor_coords)
+                self.plotter_sim.add_points(
+                    sensor_points,
+                    color="black",
+                    point_size=10,
+                    render_points_as_spheres=True,
+                )
+
+            self.plotter_sim.show_grid()
+            self.plotter_sim.render()
+
+        except Exception as e:
+            logger.error(f"Failed to update simulation plot: {e}")
+
+    def _update_sensor_plot(self):
+        """Update the sensor data matrix plot."""
+        if self.sensor_matrix_widget is None:
+            return
+
+        if self.sensor_data is None or "pressure" not in self.sensor_data:
+            logger.debug("No sensor pressure data available")
+            return
+
+        try:
+            data_matrix = self._to_numpy(self.sensor_data["pressure"])
+
+            fig, ax = plt.subplots(figsize=(8, 4))
+            vmax = np.abs(data_matrix).max() or 1.0
+            cax = ax.imshow(
+                data_matrix,
+                aspect="auto",
+                cmap="seismic",
+                origin="lower",
+                vmin=-vmax,
+                vmax=vmax,
+            )
+            ax.set_ylabel("Sensor Index")
+            ax.set_xlabel("Time Step Index")
+            fig.colorbar(cax, ax=ax, fraction=0.03, pad=0.01)
+            plt.tight_layout()
+
+            self.sensor_matrix_widget.update(fig)
+            plt.close(fig)
+
+        except Exception as e:
+            logger.error(f"Failed to update sensor plot: {e}")
+
+    def _update_energy_plot(self):
+        """Update the energy plot."""
+        if self.energy_widget is None:
+            return
+
+        if self.energy_data is None:
+            logger.debug("No energy data available")
+            return
+
+        try:
+            total_energy = self.energy_data.get("total", [])
+            kinetic_energy = self.energy_data.get("kinetic", [])
+            potential_energy = self.energy_data.get("potential", [])
+
+            if len(total_energy) == 0:
+                return
+
+            # Get dt from timestep data if available
+            dt = self.timestep_data.get("dt", 1.0) if self.timestep_data else 1.0
+            time_array = np.arange(len(total_energy)) * dt
+
+            fig, ax = plt.subplots(figsize=(8, 4))
+            ax.plot(
+                time_array,
+                self._to_numpy(total_energy),
+                marker="o",
+                markersize=2,
+                label="Total Energy",
+            )
+            if len(kinetic_energy) > 0:
+                ax.plot(
+                    time_array,
+                    self._to_numpy(kinetic_energy),
+                    marker="x",
+                    markersize=2,
+                    label="KE",
+                )
+            if len(potential_energy) > 0:
+                ax.plot(
+                    time_array,
+                    self._to_numpy(potential_energy),
+                    marker="*",
+                    markersize=2,
+                    label="PE",
+                )
+            ax.legend()
+            ax.set_title("Global Energy")
+            ax.set_ylabel("Energy")
+            ax.set_xlabel("Time")
+            ax.grid(True, alpha=0.3)
+            plt.tight_layout()
+
+            self.energy_widget.update(fig)
+            plt.close(fig)
+
+        except Exception as e:
+            logger.error(f"Failed to update energy plot: {e}")
+
+    def _to_numpy(self, array):
+        """Convert CuPy array to NumPy if needed."""
+        if hasattr(array, "get"):
+            return array.get()
+        return np.asarray(array)
+
+    def _prettify_value(self, value):
+        """Format values for display."""
+        if isinstance(value, list):
+            if all(isinstance(x, (int, float)) for x in value):
+                return ", ".join(str(x) for x in value)
+            elif all(isinstance(x, list) for x in value):
+                return "\n".join(str(row) for row in value)
+        return str(value)
+
+    def build_ui(self):
+        """Build the visualization page UI."""
+        with v3.VContainer(fluid=True, classes="fill-height"):
+            with v3.VRow(classes="fill-height"):
+                # Left sidebar - Selection controls
+                with v3.VCol(cols=3, classes="fill-height"):
+                    self._build_selection_panel()
+
+                # Right content - Visualizations
+                with v3.VCol(cols=9, classes="fill-height"):
+                    self._build_visualization_panel()
+
+    def _build_selection_panel(self):
+        """Build the left selection panel."""
+        with v3.VCard(classes="fill-height"):
+            v3.VCardTitle("Selection")
+            with v3.VCardText():
+                # Batch selection
+                with v3.VRow(align="center", dense=True):
+                    with v3.VCol(cols=10):
+                        v3.VSelect(
+                            v_model=("selected_batch",),
+                            items=("available_batches",),
+                            label="Batch",
+                            density="compact",
+                            clearable=True,
+                        )
+                    with v3.VCol(cols=2):
+                        v3.VBtn(
+                            icon="mdi-refresh",
+                            variant="text",
+                            density="compact",
+                            click=self._refresh_batch_list,
+                        )
+
+                # Simulation selection
+                v3.VSelect(
+                    v_model=("selected_simulation",),
+                    items=("simulation_list",),
+                    label="Simulation",
+                    density="compact",
+                    clearable=True,
+                    disabled=("!selected_batch",),
+                )
+
+                # Timestep selection
+                v3.VSelect(
+                    v_model=("selected_timestep",),
+                    items=("timestep_list",),
+                    label="Timestep",
+                    item_title="title",
+                    item_value="value",
+                    density="compact",
+                    clearable=True,
+                    disabled=("!selected_simulation",),
+                )
+
+                v3.VDivider(classes="my-3")
+
+                # Parameters display
+                v3.VCardSubtitle("Simulation Parameters")
+                with v3.VExpansionPanels(multiple=True, density="compact"):
+                    with v3.VExpansionPanel(
+                        v_for="([section, params]) in Object.entries(simulation_parameters_dict)",
+                        key=("section",),
+                    ):
+                        v3.VExpansionPanelTitle("{{ section }}")
+                        with v3.VExpansionPanelText():
+                            with v3.VList(density="compact"):
+                                with v3.VListItem(
+                                    v_for="([key, value]) in Object.entries(params)",
+                                    key=("key",),
+                                ):
+                                    v3.VListItemTitle(
+                                        "{{ key }}",
+                                        classes="text-caption font-weight-bold",
+                                    )
+                                    v3.VListItemSubtitle(
+                                        "{{ value }}",
+                                        style="white-space: pre-wrap; font-family: monospace; font-size: 11px;",
+                                    )
+
+    def _build_visualization_panel(self):
+        """Build the right visualization panel."""
+        with v3.VCard(classes="fill-height"):
+            # Tabs for different views
+            with v3.VTabs(v_model=("viz_active_tab",), density="compact"):
+                v3.VTab(value="wave", text="Wave Speed")
+                v3.VTab(value="simulation", text="Simulation")
+                v3.VTab(value="data", text="Data")
+
+            with v3.VCardText(classes="fill-height pa-0"):
+                with v3.VWindow(
+                    v_model=("viz_active_tab",),
+                    style="height: calc(100vh - 180px);",
+                ):
+                    # Wave Speed tab
+                    with v3.VWindowItem(value="wave", style="height: 100%;"):
+                        plotter_ui(
+                            self.plotter_wave,
+                            server=self.server,
+                            add_menu=False,
+                        )
+
+                    # Simulation tab
+                    with v3.VWindowItem(value="simulation", style="height: 100%;"):
+                        plotter_ui(
+                            self.plotter_sim,
+                            server=self.server,
+                            add_menu=False,
+                        )
+
+                    # Data tab
+                    with v3.VWindowItem(value="data", style="height: 100%;"):
+                        with v3.VContainer(fluid=True, classes="fill-height"):
+                            with v3.VRow(classes="flex-grow-1"):
+                                with v3.VCol(
+                                    cols=12,
+                                    classes="d-flex align-center justify-center",
+                                ):
+                                    self.sensor_matrix_widget = mpl_widgets.Figure(
+                                        figure=None
+                                    )
+                                    self.sensor_matrix_widget.update(
+                                        plt.figure(figsize=(10, 4))
+                                    )
+                            with v3.VRow(classes="flex-grow-1"):
+                                with v3.VCol(
+                                    cols=12,
+                                    classes="d-flex align-center justify-center",
+                                ):
+                                    self.energy_widget = mpl_widgets.Figure(
+                                        figure=None
+                                    )
+                                    self.energy_widget.update(
+                                        plt.figure(figsize=(10, 4))
+                                    )

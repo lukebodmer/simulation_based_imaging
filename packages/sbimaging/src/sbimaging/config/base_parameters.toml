@@ -1,0 +1,43 @@
+# Base simulation parameters template
+# This file defines the default structure for simulation configs.
+# Batch presets override specific values in the [sweep] sections.
+
+[sources]
+number = 6
+centers = [
+    [0.5, 0.5, 0.0],
+    [0.5, 0.5, 1.0],
+    [0.5, 0.0, 0.5],
+    [0.5, 1.0, 0.5],
+    [0.0, 0.5, 0.5],
+    [1.0, 0.5, 0.5],
+]
+radii = [0.05, 0.05, 0.05, 0.05, 0.05, 0.05]
+amplitudes = [1, 1, 1, 1, 1, 1]
+frequencies = [3, 3, 3, 3, 3, 3]
+
+[material]
+inclusion_density = 2.0
+inclusion_wave_speed = 2.0
+outer_wave_speed = 2.0
+outer_density = 2.0
+
+[mesh]
+grid_size = 0.04
+box_size = 1.0
+inclusion_center = [0.5, 0.5, 0.5]
+inclusion_scaling = [0.2, 0.2, 0.2]
+inclusion_semi_major_axis_direction = [0.0, 0.0, 1.0]
+
+[solver]
+number_of_timesteps = 10000
+polynomial_order = 1
+
+[receivers]
+sensors_per_face = 25
+
+[output_intervals]
+image = 1000
+data = 1000
+points = 10
+energy = 500
