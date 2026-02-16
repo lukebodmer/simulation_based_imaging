@@ -1,0 +1,161 @@
+/*
+ * VideoCarousel styles - Nord themed video carousel
+ */
+
+.carousel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--spacing-lg);
+  width: 100%;
+  max-width: 900px;
+}
+
+.videoContainer {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+
+.videoWrapper {
+  flex: 1;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  background-color: var(--color-bg-tertiary);
+  box-shadow: var(--shadow-lg);
+}
+
+.video {
+  display: block;
+  width: 100%;
+  height: auto;
+  background-color: var(--nord0);
+}
+
+.navButton {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 10;
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-full);
+  background-color: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--transition-fast);
+  box-shadow: var(--shadow-md);
+}
+
+.navButton:hover {
+  background-color: var(--color-bg-tertiary);
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+  transform: translateY(-50%) scale(1.05);
+}
+
+.navButton:active {
+  transform: translateY(-50%) scale(0.95);
+}
+
+.navButtonLeft {
+  left: -24px;
+}
+
+.navButtonRight {
+  right: -24px;
+}
+
+.info {
+  text-align: center;
+  max-width: 600px;
+}
+
+.videoTitle {
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+  margin-bottom: var(--spacing-sm);
+}
+
+.videoDescription {
+  font-size: var(--font-size-base);
+  color: var(--color-text-secondary);
+  line-height: var(--line-height-relaxed);
+}
+
+.indicators {
+  display: flex;
+  gap: var(--spacing-sm);
+}
+
+.indicator {
+  width: 12px;
+  height: 12px;
+  border-radius: var(--radius-full);
+  background-color: var(--color-border);
+  border: none;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.indicator:hover {
+  background-color: var(--color-text-muted);
+  transform: scale(1.2);
+}
+
+.indicatorActive {
+  background-color: var(--color-primary);
+  box-shadow: 0 0 0 3px rgba(136, 192, 208, 0.3);
+}
+
+/* Compact variant for fitting in a single viewport */
+.carouselCompact {
+  max-width: 1050px;
+  gap: var(--spacing-md);
+}
+
+.carouselCompact .videoWrapper {
+  max-height: 65vh;
+}
+
+.carouselCompact .video {
+  max-height: 65vh;
+  width: auto;
+  max-width: 100%;
+  margin: 0 auto;
+}
+
+.carouselCompact .videoTitle {
+  font-size: var(--font-size-lg);
+  margin-bottom: var(--spacing-xs);
+}
+
+.carouselCompact .videoDescription {
+  font-size: var(--font-size-sm);
+}
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .navButton {
+    width: 40px;
+    height: 40px;
+  }
+
+  .navButtonLeft {
+    left: -12px;
+  }
+
+  .navButtonRight {
+    right: -12px;
+  }
+
+  .carousel {
+    padding: 0 var(--spacing-lg);
+  }
+}

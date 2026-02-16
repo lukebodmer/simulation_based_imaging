@@ -20,6 +20,57 @@ DEFAULT_DATA_DIR = Path("/data/simulations")
 # PyVista offscreen rendering for trame
 pv.OFF_SCREEN = True
 
+# Available colormaps for visualization
+COLORMAP_OPTIONS = [
+    {"title": "Seismic (diverging)", "value": "seismic"},
+    {"title": "Coolwarm (diverging)", "value": "coolwarm"},
+    {"title": "RdBu (diverging)", "value": "RdBu_r"},
+    {"title": "Viridis", "value": "viridis"},
+    {"title": "Plasma", "value": "plasma"},
+    {"title": "Inferno", "value": "inferno"},
+    {"title": "Magma", "value": "magma"},
+    {"title": "Cividis", "value": "cividis"},
+    {"title": "Turbo", "value": "turbo"},
+    {"title": "Jet", "value": "jet"},
+    {"title": "Hot", "value": "hot"},
+    {"title": "Cool", "value": "cool"},
+    {"title": "Gray", "value": "gray"},
+]
+
+# Opacity presets for different visualization needs
+OPACITY_PRESETS = [
+    {
+        "title": "Symmetric (hide zero)",
+        "value": "symmetric",
+        "opacity": [0.9, 0.7, 0.5, 0.3, 0, 0.3, 0.5, 0.7, 0.9],
+    },
+    {
+        "title": "Linear",
+        "value": "linear",
+        "opacity": [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8, 1.0],
+    },
+    {
+        "title": "Uniform",
+        "value": "uniform",
+        "opacity": [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+    },
+    {
+        "title": "High values only",
+        "value": "high_only",
+        "opacity": [0.0, 0.0, 0.0, 0.0, 0.0, 0.2, 0.5, 0.8, 1.0],
+    },
+    {
+        "title": "Low values only",
+        "value": "low_only",
+        "opacity": [1.0, 0.8, 0.5, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0],
+    },
+    {
+        "title": "Extremes only",
+        "value": "extremes",
+        "opacity": [1.0, 0.5, 0.1, 0.0, 0.0, 0.0, 0.1, 0.5, 1.0],
+    },
+]
+
 
 class VisualizeBatchPage:
     """Page for visualizing completed simulation batches."""
@@ -56,6 +107,16 @@ class VisualizeBatchPage:
         self.state.simulation_parameters_dict = {}
         self.state.viz_active_tab = "wave"
 
+        # Colormap and visualization controls
+        self.state.colormap_options = COLORMAP_OPTIONS
+        self.state.opacity_presets = OPACITY_PRESETS
+        self.state.selected_colormap = "seismic"
+        self.state.selected_opacity_preset = "symmetric"
+        self.state.clim_min = -1.0
+        self.state.clim_max = 1.0
+        self.state.auto_clim = False
+        self.state.point_size = 8
+
         # Refresh batch list on init
         self._refresh_batch_list()
 
@@ -63,6 +124,14 @@ class VisualizeBatchPage:
         self.state.change("selected_batch")(self._on_batch_selected)
         self.state.change("selected_simulation")(self._on_simulation_selected)
         self.state.change("selected_timestep")(self._on_timestep_selected)
+        self.state.change("selected_colormap")(self._on_visualization_setting_changed)
+        self.state.change("selected_opacity_preset")(
+            self._on_visualization_setting_changed
+        )
+        self.state.change("clim_min")(self._on_visualization_setting_changed)
+        self.state.change("clim_max")(self._on_visualization_setting_changed)
+        self.state.change("auto_clim")(self._on_visualization_setting_changed)
+        self.state.change("point_size")(self._on_visualization_setting_changed)
 
     def _refresh_batch_list(self):
         """Scan /data/simulations for available batches."""
@@ -207,6 +276,12 @@ class VisualizeBatchPage:
 
         sim_dir = DEFAULT_DATA_DIR / batch_name / "simulations" / sim_hash
         self._load_timestep_and_visualize(sim_dir, selected_timestep)
+
+    def _on_visualization_setting_changed(self, **kwargs):
+        """Handle changes to visualization settings (colormap, clim, etc.)."""
+        # Only update if we have data loaded
+        if self.timestep_data is not None and self.mesh_data is not None:
+            self._update_simulation_plot()
 
     def _load_timestep_and_visualize(self, sim_dir: Path, timestep_filename: str):
         """Load timestep data and update all visualizations."""
@@ -366,13 +441,32 @@ class VisualizeBatchPage:
             if "p" in fields:
                 pressure = self._to_numpy(fields["p"]).ravel(order="F")
 
+                # Get visualization settings from state
+                colormap = self.state.selected_colormap
+                point_size = int(self.state.point_size)
+
+                # Get opacity from preset
+                opacity_preset = self.state.selected_opacity_preset
+                opacity = [0.9, 0.7, 0.5, 0.3, 0, 0.3, 0.5, 0.7, 0.9]  # default
+                for preset in OPACITY_PRESETS:
+                    if preset["value"] == opacity_preset:
+                        opacity = preset["opacity"]
+                        break
+
+                # Determine color limits
+                if self.state.auto_clim:
+                    clim_max = float(np.abs(pressure).max()) or 1.0
+                    clim = [-clim_max, clim_max]
+                else:
+                    clim = [float(self.state.clim_min), float(self.state.clim_max)]
+
                 self.plotter_sim.add_points(
                     node_coordinates,
                     scalars=pressure,
-                    cmap="seismic",
-                    opacity=[0.9, 0.7, 0.5, 0.5, 0, 0.5, 0.5, 0.7, 0.9],
-                    clim=[-1.0, 1.0],
-                    point_size=8,
+                    cmap=colormap,
+                    opacity=opacity,
+                    clim=clim,
+                    point_size=point_size,
                     render_points_as_spheres=True,
                 )
 
@@ -598,7 +692,9 @@ class VisualizeBatchPage:
                             variant="text",
                             density="compact",
                             click=self._go_to_previous_simulation,
-                            disabled=("!selected_simulation || simulation_list.length === 0",),
+                            disabled=(
+                                "!selected_simulation || simulation_list.length === 0",
+                            ),
                         )
                     with v3.VCol(cols=8, classes="pa-0"):
                         v3.VSelect(
@@ -616,7 +712,9 @@ class VisualizeBatchPage:
                             variant="text",
                             density="compact",
                             click=self._go_to_next_simulation,
-                            disabled=("!selected_simulation || simulation_list.length === 0",),
+                            disabled=(
+                                "!selected_simulation || simulation_list.length === 0",
+                            ),
                         )
 
                 # Timestep selection with navigation buttons
@@ -627,7 +725,9 @@ class VisualizeBatchPage:
                             variant="text",
                             density="compact",
                             click=self._go_to_previous_timestep,
-                            disabled=("!selected_timestep || timestep_list.length === 0",),
+                            disabled=(
+                                "!selected_timestep || timestep_list.length === 0",
+                            ),
                         )
                     with v3.VCol(cols=8, classes="pa-0"):
                         v3.VSelect(
@@ -647,7 +747,9 @@ class VisualizeBatchPage:
                             variant="text",
                             density="compact",
                             click=self._go_to_next_timestep,
-                            disabled=("!selected_timestep || timestep_list.length === 0",),
+                            disabled=(
+                                "!selected_timestep || timestep_list.length === 0",
+                            ),
                         )
 
                 v3.VDivider(classes="my-3")
@@ -700,12 +802,76 @@ class VisualizeBatchPage:
 
                     # Simulation tab
                     with v3.VWindowItem(value="simulation", style="height: 100%;"):
-                        view_sim = plotter_ui(
-                            self.plotter_sim,
-                            server=self.server,
-                            add_menu=False,
-                        )
-                        self.ctrl.view_update_sim = view_sim.update
+                        # Visualization controls toolbar
+                        with v3.VToolbar(density="compact", color="surface"):
+                            with v3.VRow(dense=True, align="center", classes="px-2"):
+                                with v3.VCol(cols="auto"):
+                                    v3.VSelect(
+                                        v_model=("selected_colormap",),
+                                        items=("colormap_options",),
+                                        label="Colormap",
+                                        density="compact",
+                                        hide_details=True,
+                                        style="min-width: 180px;",
+                                    )
+                                with v3.VCol(cols="auto"):
+                                    v3.VSelect(
+                                        v_model=("selected_opacity_preset",),
+                                        items=("opacity_presets",),
+                                        label="Opacity",
+                                        density="compact",
+                                        hide_details=True,
+                                        style="min-width: 160px;",
+                                    )
+                                with v3.VCol(cols="auto"):
+                                    v3.VTextField(
+                                        v_model=("clim_min",),
+                                        label="Min",
+                                        type="number",
+                                        step="0.1",
+                                        density="compact",
+                                        hide_details=True,
+                                        disabled=("auto_clim",),
+                                        style="max-width: 80px;",
+                                    )
+                                with v3.VCol(cols="auto"):
+                                    v3.VTextField(
+                                        v_model=("clim_max",),
+                                        label="Max",
+                                        type="number",
+                                        step="0.1",
+                                        density="compact",
+                                        hide_details=True,
+                                        disabled=("auto_clim",),
+                                        style="max-width: 80px;",
+                                    )
+                                with v3.VCol(cols="auto"):
+                                    v3.VCheckbox(
+                                        v_model=("auto_clim",),
+                                        label="Auto",
+                                        density="compact",
+                                        hide_details=True,
+                                    )
+                                with v3.VCol(cols="auto"):
+                                    v3.VSlider(
+                                        v_model=("point_size",),
+                                        label="Pt Size",
+                                        min=1,
+                                        max=20,
+                                        step=1,
+                                        density="compact",
+                                        hide_details=True,
+                                        thumb_label=True,
+                                        style="min-width: 120px;",
+                                    )
+                        # PyVista view - use calc to subtract toolbar height
+                        with v3.VSheet(style="height: calc(100% - 64px); width: 100%;"):
+                            view_sim = plotter_ui(
+                                self.plotter_sim,
+                                server=self.server,
+                                add_menu=False,
+                            )
+                            self.ctrl.view_update_sim = view_sim.update
 
                     # Data tab
                     with v3.VWindowItem(value="data", style="height: 100%;"):
@@ -726,9 +892,7 @@ class VisualizeBatchPage:
                                     cols=12,
                                     classes="d-flex align-center justify-center",
                                 ):
-                                    self.energy_widget = mpl_widgets.Figure(
-                                        figure=None
-                                    )
+                                    self.energy_widget = mpl_widgets.Figure(figure=None)
                                     self.energy_widget.update(
                                         plt.figure(figsize=(10, 4))
                                     )

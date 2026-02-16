@@ -9,7 +9,7 @@ with varying parameters, including:
 - Completion tracking and resume capability
 """
 
-from sbimaging.batch.executor import BatchExecutor
+from sbimaging.batch.executor import BatchExecutor, resume_batch, run_batch
 from sbimaging.batch.generator import ParameterGenerator
 from sbimaging.batch.planner import BatchPlanner
 
@@ -17,4 +17,6 @@ __all__ = [
     "BatchExecutor",
     "BatchPlanner",
     "ParameterGenerator",
+    "resume_batch",
+    "run_batch",
 ]

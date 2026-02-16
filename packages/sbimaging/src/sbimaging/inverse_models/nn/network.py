@@ -5,6 +5,7 @@ sensor data to material properties or k-space coefficients.
 """
 
 import pickle
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -13,7 +14,6 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from sbimaging.inverse_models.base import InverseModel, train_test_split_by_index
-from sbimaging.logging import get_logger
 
 
 class ResidualBlock1D(nn.Module):
@@ -135,6 +135,7 @@ class NeuralNetworkModel(InverseModel):
         learning_rate: float = 1e-4,
         weight_decay: float = 1e-4,
         sample_ids: list[str] | None = None,
+        progress_callback: Callable[[int, int, float], None] | None = None,
     ) -> dict[str, float]:
         """Train the neural network.
 
@@ -147,6 +148,8 @@ class NeuralNetworkModel(InverseModel):
             learning_rate: Initial learning rate.
             weight_decay: Weight decay for regularization.
             sample_ids: Optional sample identifiers.
+            progress_callback: Optional callback for progress updates.
+                Signature: (epoch, total_epochs, train_loss, test_loss) -> None
 
         Returns:
             Dictionary with final training and test loss.
@@ -157,8 +160,8 @@ class NeuralNetworkModel(InverseModel):
         if sample_ids is None:
             sample_ids = [str(i) for i in range(len(X))]
 
-        X_train, X_test, y_train, y_test, train_ids, test_ids = train_test_split_by_index(
-            X, y, sample_ids, test_fraction
+        X_train, X_test, y_train, y_test, train_ids, test_ids = (
+            train_test_split_by_index(X, y, sample_ids, test_fraction)
         )
 
         self.train_indices = train_ids
@@ -217,6 +220,9 @@ class NeuralNetworkModel(InverseModel):
                     f"Epoch {epoch + 1:03d}/{epochs} | "
                     f"Train: {train_loss:.6e} | Test: {test_loss:.6e} | LR: {lr:.2e}"
                 )
+
+            if progress_callback is not None:
+                progress_callback(epoch + 1, epochs, train_loss, test_loss)
 
         return {"train_loss": train_loss, "test_loss": test_loss}
 
@@ -325,9 +331,16 @@ class NeuralNetworkModel(InverseModel):
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(self._model.parameters(), 1.0)
+
+            # GradScaler may skip optimizer.step() if gradients contain inf/nan
+            # Check optimizer's step count to know if step() was actually called
+            optimizer_step_count_before = optimizer._step_count
             scaler.step(optimizer)
             scaler.update()
-            scheduler.step()
+
+            # Only step scheduler if optimizer actually stepped
+            if optimizer._step_count > optimizer_step_count_before:
+                scheduler.step()
 
             total_loss += loss.item() * X_batch.size(0)
 
@@ -338,7 +351,10 @@ class NeuralNetworkModel(InverseModel):
         self._model.eval()
         total_loss = 0.0
 
-        with torch.no_grad(), torch.cuda.amp.autocast(enabled=self.device.type == "cuda"):
+        with (
+            torch.no_grad(),
+            torch.cuda.amp.autocast(enabled=self.device.type == "cuda"),
+        ):
             for X_batch, y_batch in loader:
                 X_batch = X_batch.to(self.device)
                 y_batch = y_batch.to(self.device)

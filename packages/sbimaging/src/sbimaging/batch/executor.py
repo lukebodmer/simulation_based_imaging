@@ -220,6 +220,76 @@ class BatchExecutor:
         self._logger.info(f"Saved mesh pickle to {output_path}")
 
 
+def resume_batch(
+    batch_dir: Path,
+    progress_callback: Callable[[int, int, int], None] | None = None,
+    total_simulations_callback: Callable[[int], None] | None = None,
+) -> tuple[int, int]:
+    """Resume a batch of simulations from where it left off.
+
+    This function skips parameter and mesh generation, assuming the batch
+    was previously set up. It finds pending simulations and runs them.
+
+    Args:
+        batch_dir: Root directory for batch data.
+        progress_callback: Optional callback for progress updates.
+            Signature: (pending: int, completed: int, failed: int) -> None
+        total_simulations_callback: Optional callback to report total simulations.
+            Signature: (total: int) -> None
+
+    Returns:
+        Tuple of (completed_count, failed_count).
+
+    Raises:
+        FileNotFoundError: If batch_metadata.toml doesn't exist.
+        ValueError: If no pending simulations found or metadata invalid.
+    """
+    from sbimaging.batch.planner import BatchPlanner
+
+    logger = get_logger(__name__)
+    batch_dir = Path(batch_dir)
+
+    planner = BatchPlanner(batch_dir)
+
+    # Load existing metadata (required for resume)
+    if not planner.load_metadata():
+        raise FileNotFoundError(
+            f"No batch_metadata.toml found in {batch_dir}. "
+            "Cannot resume - the batch may not have been set up properly."
+        )
+
+    planner.compute_mesh_hashes()
+    pending = planner.find_pending_simulations()
+
+    if not pending:
+        logger.info("No pending simulations - batch is complete")
+        return 0, 0
+
+    global_dt = planner.global_dt
+    if global_dt is None:
+        raise ValueError("No global time step in metadata - batch may be corrupted")
+
+    def mesh_resolver(sim_hash: str) -> Path | None:
+        mesh_hash = planner.get_mesh_hash_for_simulation(sim_hash)
+        if mesh_hash:
+            return planner.get_mesh_file(mesh_hash)
+        return None
+
+    # Report total simulations count
+    if total_simulations_callback:
+        total_simulations_callback(len(pending))
+
+    logger.info(f"Resuming batch with {len(pending)} pending simulations")
+
+    executor = BatchExecutor(batch_dir)
+    return executor.run_all(
+        pending=pending,
+        global_dt=global_dt,
+        mesh_file_resolver=mesh_resolver,
+        progress_callback=progress_callback,
+    )
+
+
 def run_batch(
     batch_dir: Path,
     base_config_path: Path | None = None,

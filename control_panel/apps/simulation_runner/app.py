@@ -8,6 +8,7 @@ from trame.ui.vuetify3 import SinglePageLayout
 from trame.widgets import vuetify3 as v3
 
 from apps.simulation_runner.pages.batch_parameters import BatchParametersPage
+from apps.simulation_runner.pages.inverse_models import InverseModelsPage
 from apps.simulation_runner.pages.run_batch import RunBatchPage
 from apps.simulation_runner.pages.visualize_batch import VisualizeBatchPage
 from sbimaging.logging import configure_logging, get_logger
@@ -19,6 +20,7 @@ PAGES = [
     {"title": "Run Simulation Batch", "value": "run"},
     {"title": "Visualize Simulation Batch", "value": "visualize"},
     {"title": "Batch Parameters", "value": "parameters"},
+    {"title": "Inverse Models", "value": "inverse"},
 ]
 
 
@@ -34,6 +36,7 @@ class SimulationApp:
         self.run_batch_page = RunBatchPage(self.server)
         self.visualize_batch_page = VisualizeBatchPage(self.server)
         self.batch_parameters_page = BatchParametersPage(self.server)
+        self.inverse_models_page = InverseModelsPage(self.server)
 
         self._setup_state()
         self._setup_ui()
@@ -70,6 +73,11 @@ class SimulationApp:
                         text="Batch Parameters",
                         classes="text-h6 px-8",
                     )
+                    v3.VTab(
+                        value="inverse",
+                        text="Inverse Models",
+                        classes="text-h6 px-8",
+                    )
 
                 v3.VSpacer()
 
@@ -92,6 +100,9 @@ class SimulationApp:
 
                     with v3.VWindowItem(value="parameters"):
                         self.batch_parameters_page.build_ui()
+
+                    with v3.VWindowItem(value="inverse"):
+                        self.inverse_models_page.build_ui()
 
 
 def main():

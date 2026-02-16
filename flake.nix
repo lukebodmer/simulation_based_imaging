@@ -93,6 +93,8 @@
 
           # Django backend
           pythonPackages.django
+	  pythonPackages.djangorestframework
+	  pythonPackages.django-cors-headers
 
           # LSP and linting
           pythonPackages.python-lsp-server

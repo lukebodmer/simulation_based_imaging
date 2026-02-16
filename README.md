@@ -18,13 +18,8 @@ simulation_based_imaging/
 │       │       │       └── dim3/
 │       │       ├── inverse_models/
 │       │       │   ├── gp/        # Gaussian processes
-│       │       │   │   ├── dim1/
-│       │       │   │   ├── dim2/
-│       │       │   │   └── dim3/
-│       │       │   └── nn/        # Neural networks
-│       │       │       ├── dim1/
-│       │       │       ├── dim2/
-│       │       │       └── dim3/
+│       │       │   ├── nn/        # Neural networks (CNN, MLP)
+│       │       │   └── dim2/      # 2D-specific k-space utilities
 │       │       ├── meshing/       # Mesh generation utilities (gmsh)
 │       │       └── array/         # GPU/CPU array backend abstraction
 │       ├── tests/
@@ -82,6 +77,40 @@ A standalone library for numerical simulations and inverse modeling. Can be used
 ```python
 from sbimaging.array import xp  # xp is cupy or numpy
 ```
+
+**2D Inverse Models**: Train neural networks to recover inclusion geometry from sensor data:
+
+```python
+from sbimaging.inverse_models.dim2 import (
+    DataLoader2D,
+    train_2d_inverse_model,
+    predict_and_visualize,
+    inclusion_to_kspace,
+    kspace_to_image,
+)
+
+# Train a model on batch simulation data
+results = train_2d_inverse_model(
+    batch_dir="/data/2d-simulations",
+    output_path="models/2d_inverse.pkl",
+    architecture="mlp",  # or "cnn"
+    grid_size=64,
+    epochs=500,
+)
+
+# Predict and visualize
+pred_image, true_image = predict_and_visualize(
+    model_path="models/2d_inverse.pkl",
+    batch_dir="/data/2d-simulations",
+    sim_id="sim_00050",
+)
+```
+
+The 2D inverse model uses k-space (frequency domain) representation:
+1. Sensor data (40 sensors x ~3000 timesteps) is flattened as input
+2. Inclusion geometry is converted to a 2D k-space grid (64x64 complex = 8192 coefficients)
+3. Neural network learns the mapping: sensor data → k-space coefficients
+4. Inverse FFT recovers the real-space inclusion image
 
 **Logging**: Unified logging to both terminal and log files:
 

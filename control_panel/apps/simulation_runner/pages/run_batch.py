@@ -7,7 +7,7 @@ import toml
 from trame.widgets import html
 from trame.widgets import vuetify3 as v3
 
-from sbimaging.batch.executor import run_batch
+from sbimaging.batch.executor import resume_batch, run_batch
 from sbimaging.batch.generator import ParameterRange, ParameterSpace
 from sbimaging.batch.planner import BatchPlanner
 from sbimaging.config import get_base_config_path, list_presets, load_preset
@@ -193,7 +193,14 @@ class RunBatchPage:
         self.state.total_simulations = 0
         self.state.progress_percent = 0
         self.state.existing_param_count = 0
+        self.state.existing_completed_count = 0
+        self.state.existing_pending_count = 0
+        self.state.can_resume_batch = False
         self.state.log_messages = []
+
+        # Existing batches list
+        self.state.existing_batches = []
+        self._scan_existing_batches()
 
         # Save preset dialog state
         self.state.show_save_preset_dialog = False
@@ -211,15 +218,93 @@ class RunBatchPage:
         """Update existing count when batch name changes."""
         self._update_existing_count()
 
+    def _scan_existing_batches(self):
+        """Scan for all existing batches in the data directory."""
+        base_dir = (
+            Path(self.state.batch_dir) if self.state.batch_dir else DEFAULT_DATA_DIR
+        )
+
+        batches = []
+        if base_dir.exists():
+            for d in sorted(base_dir.iterdir()):
+                if not d.is_dir():
+                    continue
+
+                param_dir = d / "parameter_files"
+                sim_dir = d / "simulations"
+                metadata_file = d / "batch_metadata.toml"
+
+                # Only include directories that look like batches (have parameter files)
+                if not param_dir.exists():
+                    continue
+
+                param_count = len(list(param_dir.glob("*.toml")))
+                if param_count == 0:
+                    continue
+
+                # Count completed simulations
+                completed_count = 0
+                if sim_dir.exists():
+                    for sim in sim_dir.iterdir():
+                        if sim.is_dir() and (sim / "sensor_data.pkl").exists():
+                            completed_count += 1
+
+                pending_count = param_count - completed_count
+                is_complete = pending_count == 0
+                can_resume = metadata_file.exists() and pending_count > 0
+
+                batches.append(
+                    {
+                        "name": d.name,
+                        "total": param_count,
+                        "completed": completed_count,
+                        "pending": pending_count,
+                        "is_complete": is_complete,
+                        "can_resume": can_resume,
+                    }
+                )
+
+        self.state.existing_batches = batches
+
+    def _select_existing_batch(self, batch_name: str):
+        """Select an existing batch by name."""
+        self.state.batch_name = batch_name
+        self._update_existing_count()
+
+    def _on_batch_click(self, batch_name: str):
+        """Handle click on an existing batch in the list."""
+        self.state.batch_name = batch_name
+        self._update_existing_count()
+
     def _update_existing_count(self):
-        """Count existing parameter files in the batch directory."""
+        """Count existing parameter files and completed simulations."""
         batch_dir = self._get_batch_output_dir()
         param_dir = batch_dir / "parameter_files"
+        sim_dir = batch_dir / "simulations"
+        metadata_file = batch_dir / "batch_metadata.toml"
+
+        # Count parameter files
         if param_dir.exists():
-            count = len(list(param_dir.glob("*.toml")))
-            self.state.existing_param_count = count
+            param_count = len(list(param_dir.glob("*.toml")))
+            self.state.existing_param_count = param_count
         else:
+            param_count = 0
             self.state.existing_param_count = 0
+
+        # Count completed simulations (those with sensor_data.pkl)
+        completed_count = 0
+        if sim_dir.exists():
+            for d in sim_dir.iterdir():
+                if d.is_dir() and (d / "sensor_data.pkl").exists():
+                    completed_count += 1
+
+        self.state.existing_completed_count = completed_count
+        self.state.existing_pending_count = param_count - completed_count
+
+        # Can resume if we have metadata and pending simulations
+        self.state.can_resume_batch = (
+            metadata_file.exists() and param_count > 0 and completed_count < param_count
+        )
 
     def _on_preset_change(self, selected_preset, **kwargs):
         """Populate all fields from the selected preset."""
@@ -450,8 +535,19 @@ class RunBatchPage:
             density="compact",
             classes="mt-2",
             text=(
-                "'This batch already has ' + existing_param_count + ' parameter files.'",
+                "'This batch has ' + existing_param_count + ' parameter files: ' + "
+                "existing_completed_count + ' completed, ' + "
+                "existing_pending_count + ' pending.'",
             ),
+        )
+
+        v3.VAlert(
+            v_if=("can_resume_batch",),
+            type="info",
+            variant="tonal",
+            density="compact",
+            classes="mt-2",
+            text="Use 'Resume Batch' to continue from where you left off.",
         )
 
         v3.VTextarea(
@@ -939,9 +1035,77 @@ class RunBatchPage:
         """Build the status display and action buttons at the top."""
         with v3.VCard(classes="mb-4"):
             with v3.VCardText():
-                with v3.VRow(align="center", dense=True):
-                    # Status counters
-                    with v3.VCol(cols=12, md=6):
+                with v3.VRow(dense=True):
+                    # Left side: Existing batches list
+                    with v3.VCol(cols=12, md=5):
+                        html.Div("Existing Batches", classes="text-subtitle-1 mb-2")
+                        with v3.VSheet(
+                            color="grey-darken-4",
+                            rounded=True,
+                            classes="pa-2",
+                            style="max-height: 150px; overflow-y: auto;",
+                        ):
+                            # Refresh button
+                            v3.VBtn(
+                                "Refresh",
+                                variant="text",
+                                density="compact",
+                                size="small",
+                                prepend_icon="mdi-refresh",
+                                click=self._scan_existing_batches,
+                                classes="mb-2",
+                            )
+
+                            # Show message if no batches
+                            html.Div(
+                                "No batches found",
+                                v_if=("existing_batches.length === 0",),
+                                classes="text-caption text-grey",
+                            )
+
+                            # Batch list
+                            with v3.VList(
+                                density="compact",
+                                v_if=("existing_batches.length > 0",),
+                                bg_color="transparent",
+                            ):
+                                with v3.VListItem(
+                                    v_for="batch in existing_batches",
+                                    key=("batch.name",),
+                                    click=(self._on_batch_click, "[batch.name]"),
+                                    disabled=("batch.is_complete",),
+                                    classes="pa-1",
+                                ):
+                                    with v3.VListItemTitle(
+                                        classes="d-flex align-center"
+                                    ):
+                                        # Batch name
+                                        html.Span(
+                                            "{{ batch.name }}",
+                                            classes="text-body-2",
+                                        )
+                                        v3.VSpacer()
+                                        # Status indicator
+                                        v3.VIcon(
+                                            "mdi-check-circle",
+                                            v_if=("batch.is_complete",),
+                                            color="success",
+                                            size="small",
+                                            classes="ml-2",
+                                        )
+                                        v3.VChip(
+                                            v_if=("!batch.is_complete",),
+                                            size="x-small",
+                                            color="warning",
+                                            classes="ml-2",
+                                            __properties=[
+                                                ("text", "batch.pending + ' pending'")
+                                            ],
+                                        )
+
+                    # Middle: Status counters
+                    with v3.VCol(cols=12, md=4):
+                        html.Div("Current Run Status", classes="text-subtitle-1 mb-2")
                         with v3.VRow(dense=True):
                             with v3.VCol(cols=4):
                                 with v3.VCard(color="info", variant="tonal"):
@@ -965,27 +1129,32 @@ class RunBatchPage:
                                         )
                                         html.Div("Failed", classes="text-caption")
 
-                    # Action buttons
-                    with v3.VCol(cols=12, md=6):
-                        with v3.VRow(dense=True):
-                            with v3.VCol(cols=8):
-                                v3.VBtn(
-                                    "Run Batch",
-                                    color="primary",
-                                    size="large",
-                                    block=True,
-                                    disabled=("is_running || !batch_name",),
-                                    click=self._run_batch,
-                                )
-                            with v3.VCol(cols=4):
-                                v3.VBtn(
-                                    "Save Preset",
-                                    variant="outlined",
-                                    size="large",
-                                    block=True,
-                                    prepend_icon="mdi-content-save",
-                                    click=self._open_save_preset_dialog,
-                                )
+                    # Right side: Action buttons
+                    with v3.VCol(cols=12, md=3):
+                        html.Div("Actions", classes="text-subtitle-1 mb-2")
+                        v3.VBtn(
+                            "Run New Batch",
+                            color="primary",
+                            block=True,
+                            disabled=("is_running || !batch_name",),
+                            click=self._run_batch,
+                            classes="mb-2",
+                        )
+                        v3.VBtn(
+                            "Resume Batch",
+                            color="secondary",
+                            block=True,
+                            disabled=("is_running || !can_resume_batch",),
+                            click=self._resume_batch,
+                            classes="mb-2",
+                        )
+                        v3.VBtn(
+                            "Save Preset",
+                            variant="outlined",
+                            block=True,
+                            prepend_icon="mdi-content-save",
+                            click=self._open_save_preset_dialog,
+                        )
 
                 # Progress bar and message
                 v3.VProgressLinear(
@@ -1511,3 +1680,101 @@ energy = {int(self.state.output_energy_interval)}
 
         finally:
             self.state.is_running = False
+            self._update_existing_count()
+            self._scan_existing_batches()
+
+    def _resume_batch(self):
+        """Resume a batch from where it left off."""
+        asyncio.create_task(self._resume_batch_async())
+
+    async def _resume_batch_async(self):
+        """Resume batch execution asynchronously."""
+        batch_dir = self._get_batch_output_dir()
+
+        self.state.is_running = True
+        self.state.progress_message = "Resuming batch..."
+        self.state.log_messages = []
+        self.state.pending_count = 0
+        self.state.completed_count = 0
+        self.state.failed_count = 0
+        self.state.total_simulations = 0
+        self.state.progress_percent = 0
+
+        self._log(f"Resuming batch: {self.state.batch_name}")
+        self._log(f"Output directory: {batch_dir}")
+
+        # Allow UI to update
+        await asyncio.sleep(0)
+
+        try:
+            # Get the event loop and server for state updates
+            loop = asyncio.get_event_loop()
+            server = self.server
+
+            def progress_callback(pending: int, completed: int, failed: int):
+                """Update UI state from batch executor (called from thread pool)."""
+                total = self.state.total_simulations
+                if total > 0:
+                    percent = (completed + failed) / total * 100
+                else:
+                    percent = 0
+
+                def update_state():
+                    self.state.pending_count = pending
+                    self.state.completed_count = completed
+                    self.state.failed_count = failed
+                    self.state.progress_percent = int(percent)
+                    self.state.progress_message = (
+                        f"Running simulations... ({completed + failed}/{total})"
+                    )
+                    server.state.flush()
+
+                loop.call_soon_threadsafe(update_state)
+
+            def total_simulations_callback(total: int):
+                """Set total simulations count (called from thread pool)."""
+
+                def update_state():
+                    self.state.total_simulations = total
+                    self.state.pending_count = total
+                    self.state.progress_message = f"Resuming: {total} pending"
+                    self.state.progress_percent = 0
+                    server.state.flush()
+
+                loop.call_soon_threadsafe(update_state)
+
+            self._log("Scanning for pending simulations...")
+
+            # Run the resume in a thread pool
+            completed, failed = await loop.run_in_executor(
+                None,
+                lambda: resume_batch(
+                    batch_dir=batch_dir,
+                    progress_callback=progress_callback,
+                    total_simulations_callback=total_simulations_callback,
+                ),
+            )
+
+            self.state.completed_count = completed
+            self.state.failed_count = failed
+            self.state.pending_count = 0
+            self.state.progress_percent = 100
+            self.state.progress_message = (
+                f"Complete: {completed} succeeded, {failed} failed"
+            )
+            self._log(f"Batch resumed: {completed} completed, {failed} failed")
+
+        except FileNotFoundError as e:
+            self.state.progress_message = f"Cannot resume: {e}"
+            self._log(f"Error: {e}")
+            logger.error(f"Cannot resume batch: {e}")
+
+        except Exception as e:
+            self.state.progress_message = f"Error: {e}"
+            self._log(f"Error: {e}")
+            logger.exception("Batch resume failed")
+
+        finally:
+            self.state.is_running = False
+            self._update_existing_count()
+            self._scan_existing_batches()

@@ -112,6 +112,9 @@ class BatchPlanner:
     def find_pending_simulations(self) -> list[str]:
         """Find parameter files that haven't been simulated.
 
+        A simulation is considered complete if its output directory contains
+        a sensor_data.pkl file (the final output written at end of simulation).
+
         Returns:
             List of parameter file hashes (stems) that need simulation.
         """
@@ -119,9 +122,9 @@ class BatchPlanner:
 
         completed_hashes = set()
         if self.simulations_dir.exists():
-            completed_hashes = {
-                d.name for d in self.simulations_dir.iterdir() if d.is_dir()
-            }
+            for d in self.simulations_dir.iterdir():
+                if d.is_dir() and (d / "sensor_data.pkl").exists():
+                    completed_hashes.add(d.name)
 
         self._pending_simulations = sorted(param_hashes - completed_hashes)
 
@@ -395,3 +398,18 @@ class BatchPlanner:
     def mesh_info(self) -> dict[str, MeshInfo]:
         """Get mesh information dictionary."""
         return self._mesh_info
+
+    def count_completed_simulations(self) -> int:
+        """Count simulations that have completed successfully.
+
+        Returns:
+            Number of completed simulations (those with sensor_data.pkl).
+        """
+        if not self.simulations_dir.exists():
+            return 0
+
+        count = 0
+        for d in self.simulations_dir.iterdir():
+            if d.is_dir() and (d / "sensor_data.pkl").exists():
+                count += 1
+        return count
