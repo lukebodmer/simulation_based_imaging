@@ -249,5 +249,49 @@
   font-size: var(--font-size-2xl);
   font-weight: var(--font-weight-semibold);
   color: var(--color-text-primary);
+  margin-bottom: 0;
+}
+
+.subslideTitleRow {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-lg);
   margin-bottom: var(--spacing-lg);
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+/* Noise level selector */
+.noiseSelector {
+  display: flex;
+  gap: 2px;
+  background-color: var(--color-bg-tertiary);
+  padding: 2px;
+  border-radius: var(--radius-md);
+}
+
+.noiseSelectorButton {
+  padding: var(--spacing-xs) var(--spacing-md);
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+  white-space: nowrap;
+}
+
+.noiseSelectorButton:hover {
+  color: var(--color-text-primary);
+}
+
+.noiseSelectorButtonActive {
+  background-color: var(--color-primary);
+  color: var(--color-text-inverse);
+}
+
+.noiseSelectorButtonActive:hover {
+  color: var(--color-text-inverse);
 }

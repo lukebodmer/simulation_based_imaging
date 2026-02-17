@@ -5,6 +5,9 @@ import pickle
 import time
 from pathlib import Path
 
+import matplotlib
+
+matplotlib.use("Agg")  # Use non-interactive backend before importing pyplot
 import matplotlib.pyplot as plt
 import numpy as np
 import pyvista as pv

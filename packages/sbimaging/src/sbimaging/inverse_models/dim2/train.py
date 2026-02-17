@@ -15,6 +15,39 @@ from sbimaging.inverse_models.dim2.network import NeuralNetwork2D
 from sbimaging.logging import get_logger
 
 
+def add_gaussian_noise(
+    X: np.ndarray,
+    noise_percent: float,
+    rng: np.random.Generator | None = None,
+) -> np.ndarray:
+    """Add Gaussian noise to sensor data.
+
+    Args:
+        X: Input sensor data array (n_samples, n_features).
+        noise_percent: Noise level as percentage of peak amplitude (0-100).
+            For example, 5.0 means noise std = 5% of the peak absolute value.
+        rng: Random number generator for reproducibility.
+
+    Returns:
+        Noisy sensor data with same shape as input.
+    """
+    if noise_percent <= 0:
+        return X
+
+    if rng is None:
+        rng = np.random.default_rng()
+
+    # Calculate peak amplitude across all samples
+    peak_amplitude = np.abs(X).max()
+
+    # Noise standard deviation as fraction of peak
+    noise_std = (noise_percent / 100.0) * peak_amplitude
+
+    # Generate and add noise
+    noise = rng.normal(0, noise_std, size=X.shape).astype(X.dtype)
+    return X + noise
+
+
 def train_2d_inverse_model(
     batch_dir: Path | str,
     output_path: Path | str,
@@ -26,6 +59,8 @@ def train_2d_inverse_model(
     test_fraction: float = 0.1,
     trim_timesteps: int = 50,
     downsample_factor: int = 2,
+    noise_percent: float = 0.0,
+    noise_seed: int | None = None,
 ) -> dict:
     """Train a 2D inverse model on FDTD simulation data.
 
@@ -40,6 +75,9 @@ def train_2d_inverse_model(
         test_fraction: Fraction of data for testing.
         trim_timesteps: Initial timesteps to remove from sensor data.
         downsample_factor: Factor to downsample sensor timesteps.
+        noise_percent: Gaussian noise level as percentage of peak amplitude (0-100).
+            Added to sensor data before training to test model robustness.
+        noise_seed: Random seed for noise generation (for reproducibility).
 
     Returns:
         Dictionary with training results and metrics.
@@ -57,6 +95,12 @@ def train_2d_inverse_model(
     X, y, sample_ids = loader.load()
 
     logger.info(f"Input shape: {X.shape}, Output shape: {y.shape}")
+
+    # Add noise if requested
+    if noise_percent > 0:
+        rng = np.random.default_rng(noise_seed)
+        X = add_gaussian_noise(X, noise_percent, rng)
+        logger.info(f"Added {noise_percent}% Gaussian noise (seed={noise_seed})")
 
     # Create and train model
     model = NeuralNetwork2D(
@@ -95,6 +139,8 @@ def train_2d_inverse_model(
         "n_train": len(train_ids),
         "n_test": len(test_ids),
         "grid_size": grid_size,
+        "noise_percent": noise_percent,
+        "noise_seed": noise_seed,
     }
 
 
@@ -212,6 +258,18 @@ if __name__ == "__main__":
         default=1e-4,
         help="Learning rate",
     )
+    parser.add_argument(
+        "--noise-percent",
+        type=float,
+        default=0.0,
+        help="Gaussian noise level as percentage of peak amplitude (0-100)",
+    )
+    parser.add_argument(
+        "--noise-seed",
+        type=int,
+        default=None,
+        help="Random seed for noise generation (for reproducibility)",
+    )
 
     args = parser.parse_args()
 
@@ -225,4 +283,6 @@ if __name__ == "__main__":
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
+        noise_percent=args.noise_percent,
+        noise_seed=args.noise_seed,
     )

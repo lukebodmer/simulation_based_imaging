@@ -72,9 +72,109 @@ function TimelineNav({
   );
 }
 
+type NoiseLevel = "none" | "5" | "10";
+
+function NoiseSelector({
+  value,
+  onChange,
+}: {
+  value: NoiseLevel;
+  onChange: (level: NoiseLevel) => void;
+}) {
+  const options: { level: NoiseLevel; label: string }[] = [
+    { level: "none", label: "No Noise" },
+    { level: "5", label: "5% Noise" },
+    { level: "10", label: "10% Noise" },
+  ];
+
+  return (
+    <div className={styles.noiseSelector}>
+      {options.map((option) => (
+        <button
+          key={option.level}
+          className={`${styles.noiseSelectorButton} ${
+            value === option.level ? styles.noiseSelectorButtonActive : ""
+          }`}
+          onClick={() => onChange(option.level)}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function get1DResultImages(noiseLevel: NoiseLevel) {
+  const prefix =
+    noiseLevel === "none"
+      ? "1d-inverse_model_results"
+      : `1d-${noiseLevel}noise_inverse_model_results`;
+
+  const noiseDescription =
+    noiseLevel === "none"
+      ? ""
+      : ` Training data includes ${noiseLevel}% Gaussian noise added to sensor measurements.`;
+
+  return [
+    {
+      src: `/images/${prefix}_01.png`,
+      title: "Test Set Results (1/4)",
+      description: `Comparison of ground truth density profiles (blue) with neural network predictions (gray). Each pair shows the true inclusion position and density above the network's prediction.${noiseDescription}`,
+    },
+    {
+      src: `/images/${prefix}_02.png`,
+      title: "Test Set Results (2/4)",
+      description: `The neural network learns to map sensor measurements to 1D density profiles, predicting both the location and density of inclusions within the tunnel.${noiseDescription}`,
+    },
+    {
+      src: `/images/${prefix}_03.png`,
+      title: "Test Set Results (3/4)",
+      description: `These test samples were held out during training. The model generalizes to unseen inclusion configurations with varying positions, sizes, and densities.${noiseDescription}`,
+    },
+    {
+      src: `/images/${prefix}_04.png`,
+      title: "Test Set Results (4/4)",
+      description: `Final test samples demonstrating the inverse model's ability to reconstruct density profiles from boundary sensor measurements alone.${noiseDescription}`,
+    },
+  ];
+}
+
+function get2DResultImages(noiseLevel: NoiseLevel) {
+  const prefix =
+    noiseLevel === "none"
+      ? "2d-inverse_model_results"
+      : `2d-${noiseLevel}noise_inverse_model_results`;
+
+  const noiseDescription =
+    noiseLevel === "none"
+      ? ""
+      : ` Training data includes ${noiseLevel}% Gaussian noise added to sensor measurements.`;
+
+  // 5% noise only has 6 images
+  const imageCount = noiseLevel === "5" ? 6 : 7;
+
+  const descriptions = [
+    "Comparison of ground truth inclusion outlines (left) with neural network predictions (right). The network learns to reconstruct inclusion geometry from sensor measurements alone.",
+    "The neural network predicts k-space coefficients which are transformed back to real space via inverse FFT, producing these reconstructed inclusion images.",
+    "Each pair shows the true inclusion shape and position alongside the network's prediction, demonstrating the model's ability to localize inclusions.",
+    "The model handles all three inclusion types (circle, square, triangle) and varying positions within the domain.",
+    "These test samples were held out during training, demonstrating the model's generalization to unseen configurations.",
+    "The inverse problem maps 61,840 sensor measurements to 8,192 k-space coefficients representing a 64x64 spatial grid.",
+    "Final test samples showing the neural network's reconstruction quality across different inclusion types and positions.",
+  ];
+
+  return Array.from({ length: imageCount }, (_, i) => ({
+    src: `/images/${prefix}_0${i + 1}.png`,
+    title: `Test Set Results (${i + 1}/${imageCount})`,
+    description: `${descriptions[i]}${noiseDescription}`,
+  }));
+}
+
 export function HomePage() {
   const [activeSection, setActiveSection] = useState("hero");
   const [navCollapsed, setNavCollapsed] = useState(true);
+  const [noiseLevel1D, setNoiseLevel1D] = useState<NoiseLevel>("none");
+  const [noiseLevel2D, setNoiseLevel2D] = useState<NoiseLevel>("none");
 
   function handleGetStarted() {
     setNavCollapsed(false);
@@ -129,7 +229,59 @@ export function HomePage() {
 
         <section id="1d-example" className={styles.section}>
           <h2 className={styles.sectionTitle}>1D Example</h2>
-          <div className={styles.sectionContent}></div>
+          <div className={styles.sectionContent}>
+            <VideoCarousel
+              videos={[
+                {
+                  src: "/videos/1d_center_inclusion.mp4",
+                  title: "Center Inclusion",
+                  description:
+                    "A 1D acoustic pulse propagates through a tunnel with a central inclusion. The inclusion has doubled density and wave speed, causing partial reflection and transmission of the wave.",
+                },
+                {
+                  src: "/videos/1d_dense_inclusion.mp4",
+                  title: "Dense Left Inclusion",
+                  description:
+                    "A wider inclusion shifted to the left with higher density and wave speed (3x). The increased impedance contrast produces stronger reflections.",
+                },
+                {
+                  src: "/videos/1d_right_inclusion.mp4",
+                  title: "Wide Right Inclusion",
+                  description:
+                    "A wide inclusion (0.25) positioned to the right with density and wave speed of 3.5x. The wave travels further before encountering the inclusion.",
+                },
+              ]}
+            />
+          </div>
+
+          <div className={styles.subslide}>
+            <h3 className={styles.subslideTitle}>Batch Simulation Results</h3>
+            <ImageCarousel
+              compact
+              images={[
+                {
+                  src: "/images/1d-inclusion_plots.png",
+                  title: "Inclusion Configurations",
+                  description:
+                    "A grid of 25 random 1D inclusion configurations used for training. Each subplot shows the position and size of the inclusion within the tunnel, with opacity indicating density.",
+                },
+                {
+                  src: "/images/1d-sensor-data-grid.png",
+                  title: "Sensor Data",
+                  description:
+                    "Corresponding sensor measurements for each simulation. The left sensor (red) and right sensor (cyan) record the acoustic wave as it propagates through the tunnel and interacts with the inclusion.",
+                },
+              ]}
+            />
+          </div>
+
+          <div className={styles.subslide}>
+            <div className={styles.subslideTitleRow}>
+              <h3 className={styles.subslideTitle}>Neural Network Results</h3>
+              <NoiseSelector value={noiseLevel1D} onChange={setNoiseLevel1D} />
+            </div>
+            <ImageCarousel compact images={get1DResultImages(noiseLevel1D)} />
+          </div>
         </section>
 
         <section id="2d-example" className={styles.section}>
@@ -181,54 +333,11 @@ export function HomePage() {
           </div>
 
           <div className={styles.subslide}>
-            <h3 className={styles.subslideTitle}>Neural Network Results</h3>
-            <ImageCarousel
-              compact
-              images={[
-                {
-                  src: "/images/2d-inverse_model_results_01.png",
-                  title: "Test Set Results (1/7)",
-                  description:
-                    "Comparison of ground truth inclusion outlines (left) with neural network predictions (right). The network learns to reconstruct inclusion geometry from sensor measurements alone.",
-                },
-                {
-                  src: "/images/2d-inverse_model_results_02.png",
-                  title: "Test Set Results (2/7)",
-                  description:
-                    "The neural network predicts k-space coefficients which are transformed back to real space via inverse FFT, producing these reconstructed inclusion images.",
-                },
-                {
-                  src: "/images/2d-inverse_model_results_03.png",
-                  title: "Test Set Results (3/7)",
-                  description:
-                    "Each pair shows the true inclusion shape and position alongside the network's prediction, demonstrating the model's ability to localize inclusions.",
-                },
-                {
-                  src: "/images/2d-inverse_model_results_04.png",
-                  title: "Test Set Results (4/7)",
-                  description:
-                    "The model handles all three inclusion types (circle, square, triangle) and varying positions within the domain.",
-                },
-                {
-                  src: "/images/2d-inverse_model_results_05.png",
-                  title: "Test Set Results (5/7)",
-                  description:
-                    "These test samples were held out during training, demonstrating the model's generalization to unseen configurations.",
-                },
-                {
-                  src: "/images/2d-inverse_model_results_06.png",
-                  title: "Test Set Results (6/7)",
-                  description:
-                    "The inverse problem maps 61,840 sensor measurements to 8,192 k-space coefficients representing a 64x64 spatial grid.",
-                },
-                {
-                  src: "/images/2d-inverse_model_results_07.png",
-                  title: "Test Set Results (7/7)",
-                  description:
-                    "Final test samples showing the neural network's reconstruction quality across different inclusion types and positions.",
-                },
-              ]}
-            />
+            <div className={styles.subslideTitleRow}>
+              <h3 className={styles.subslideTitle}>Neural Network Results</h3>
+              <NoiseSelector value={noiseLevel2D} onChange={setNoiseLevel2D} />
+            </div>
+            <ImageCarousel compact images={get2DResultImages(noiseLevel2D)} />
           </div>
         </section>
 
