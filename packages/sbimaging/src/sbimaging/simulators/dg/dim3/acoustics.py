@@ -311,6 +311,121 @@ class AcousticsOperator:
             v_p[src_nodes] = vm + delta_un * ny_s
             w_p[src_nodes] = wm + delta_un * nz_s
 
+    def _apply_source_bc_with_blending(
+        self,
+        u_m: np.ndarray,
+        v_m: np.ndarray,
+        w_m: np.ndarray,
+        p_m: np.ndarray,
+        u_p: np.ndarray,
+        v_p: np.ndarray,
+        w_p: np.ndarray,
+        p_p: np.ndarray,
+        time: float,
+        blend_start_sigmas: float = 2.0,
+        blend_duration_periods: float = 4.0,
+    ) -> None:
+        """Apply source boundary conditions with smooth transition to reflecting.
+
+        After the source pulse ends, smoothly transitions the source boundary
+        to act as a rigid (reflecting) wall, preventing it from acting as a
+        pressure sink.
+
+        Note: This causes an energy dip during the transition. Use the regular
+        _apply_source_bc if energy oscillation between positive/negative is
+        acceptable for your use case.
+
+        Args:
+            blend_start_sigmas: Start blending after this many sigmas past t0.
+                Default 2.0 starts while pulse is still at ~13% of peak.
+            blend_duration_periods: Blend over this many periods (t0).
+                Default 4.0 for a slow, smooth transition.
+        """
+        nx, ny, nz = self._nx_flat, self._ny_flat, self._nz_flat
+
+        for source in self._sources:
+            src_nodes = source.boundary_node_indices
+
+            if src_nodes.size == 0:
+                continue
+
+            # Get blend factor to determine if we should apply source BC
+            blend = source.get_blend_factor(
+                time,
+                blend_start_sigmas=blend_start_sigmas,
+                blend_duration_periods=blend_duration_periods,
+            )
+
+            if blend <= 0.0:
+                # Fully reflecting - source nodes already have reflecting BC
+                # from _apply_reflecting_bc, so skip
+                continue
+
+            pm = p_m[src_nodes]
+            um, vm, wm = u_m[src_nodes], v_m[src_nodes], w_m[src_nodes]
+            nx_s, ny_s, nz_s = nx[src_nodes], ny[src_nodes], nz[src_nodes]
+
+            # Compute reflecting BC values for velocity
+            ndotum = nx_s * um + ny_s * vm + nz_s * wm
+            u_reflecting = um - 2.0 * ndotum * nx_s
+            v_reflecting = vm - 2.0 * ndotum * ny_s
+            w_reflecting = wm - 2.0 * ndotum * nz_s
+
+            # Get source pressure and compute source BC velocities
+            p_source_raw = source.get_pressure(time)
+            z = self._rho_p.ravel("F")[src_nodes] * self._c_p.ravel("F")[src_nodes]
+            delta_un = (pm - p_source_raw) / z
+
+            u_source = um + delta_un * nx_s
+            v_source = vm + delta_un * ny_s
+            w_source = wm + delta_un * nz_s
+
+            # Blend between source BC and reflecting BC
+            p_p[src_nodes] = blend * p_source_raw + (1.0 - blend) * pm
+            u_p[src_nodes] = blend * u_source + (1.0 - blend) * u_reflecting
+            v_p[src_nodes] = blend * v_source + (1.0 - blend) * v_reflecting
+            w_p[src_nodes] = blend * w_source + (1.0 - blend) * w_reflecting
+
+    def _apply_source_bc_original(
+        self,
+        u_m: np.ndarray,
+        v_m: np.ndarray,
+        w_m: np.ndarray,
+        p_m: np.ndarray,
+        u_p: np.ndarray,
+        v_p: np.ndarray,
+        w_p: np.ndarray,
+        p_p: np.ndarray,
+        time: float,
+    ) -> None:
+        """Apply source boundary conditions (original, no blending).
+
+        Note: After the pulse ends, this forces p_p = 0 at source nodes,
+        which acts as a pressure-release boundary and can cause the mean
+        pressure in the domain to oscillate.
+        """
+        nx, ny, nz = self._nx_flat, self._ny_flat, self._nz_flat
+
+        for source in self._sources:
+            p_source = source.get_pressure(time)
+            src_nodes = source.boundary_node_indices
+
+            if src_nodes.size == 0:
+                continue
+
+            z = self._rho_p.ravel("F")[src_nodes] * self._c_p.ravel("F")[src_nodes]
+
+            pm = p_m[src_nodes]
+            um, vm, wm = u_m[src_nodes], v_m[src_nodes], w_m[src_nodes]
+            nx_s, ny_s, nz_s = nx[src_nodes], ny[src_nodes], nz[src_nodes]
+
+            delta_un = (pm - p_source) / z
+
+            p_p[src_nodes] = p_source
+            u_p[src_nodes] = um + delta_un * nx_s
+            v_p[src_nodes] = vm + delta_un * ny_s
+            w_p[src_nodes] = wm + delta_un * nz_s
+
     def _compute_upwind_flux(
         self,
         ndotum: np.ndarray,
@@ -422,16 +537,116 @@ class Source:
     def get_pressure(self, time: float) -> float:
         """Get source pressure at given time.
 
-        Uses Gaussian pulse waveform.
-
         Args:
             time: Current simulation time.
 
         Returns:
             Source pressure value.
         """
+        return self.amplitude * self._gaussian_pulse(time)
+
+    def _gaussian_pulse(self, time: float) -> float:
+        """Gaussian pulse waveform.
+
+        Note: This has a non-zero DC component which can cause numerical
+        drift in closed domains with reflecting boundaries.
+
+        Args:
+            time: Current simulation time.
+
+        Returns:
+            Waveform value between 0 and 1.
+        """
         f = self.frequency
         t0 = 1 / (2 * f)
         sigma = t0 / 4
-        pulse = np.exp(-((time - t0) ** 2 / (2 * sigma ** 2)))
-        return self.amplitude * pulse
+        return np.exp(-((time - t0) ** 2 / (2 * sigma ** 2)))
+
+    def _ricker_wavelet(self, time: float) -> float:
+        """Ricker wavelet (Mexican hat) - second derivative of Gaussian.
+
+        Has zero DC component, preventing numerical drift in closed domains.
+
+        Args:
+            time: Current simulation time.
+
+        Returns:
+            Waveform value (oscillates positive and negative).
+        """
+        f = self.frequency
+        t0 = 1.0 / f
+        arg = np.pi * f * (time - t0)
+        arg_sq = arg ** 2
+        return (1.0 - 2.0 * arg_sq) * np.exp(-arg_sq)
+
+    def get_blend_factor(
+        self,
+        time: float,
+        blend_start_sigmas: float = 4.0,
+        blend_duration_periods: float = 2.0,
+    ) -> float:
+        """Get blending factor for transitioning from source BC to reflecting BC.
+
+        Returns 1.0 during active source, smoothly transitions to 0.0 after
+        the pulse ends, allowing the source boundary to become a rigid wall.
+
+        Args:
+            time: Current simulation time.
+            blend_start_sigmas: Number of sigma after t0 to start blending.
+                Default 4.0 means pulse is at ~0.02% of peak.
+                Use smaller values (e.g., 2.0) to start blending earlier
+                while pulse is still active, for smoother energy transition.
+            blend_duration_periods: Duration of blend as multiple of t0.
+                Default 2.0. Use larger values for slower, smoother transition.
+
+        Returns:
+            Blend factor between 0.0 (fully reflecting) and 1.0 (fully source).
+        """
+        f = self.frequency
+        t0 = 1 / (2 * f)
+        sigma = t0 / 4
+
+        blend_start = t0 + blend_start_sigmas * sigma
+        blend_duration = blend_duration_periods * t0
+        blend_end = blend_start + blend_duration
+
+        if time < blend_start:
+            return 1.0
+        elif time > blend_end:
+            return 0.0
+        else:
+            # Smooth cosine transition
+            t_normalized = (time - blend_start) / blend_duration
+            return 0.5 * (1.0 + np.cos(np.pi * t_normalized))
+
+    def get_pressure_with_blend(
+        self, time: float, p_reflecting: float
+    ) -> tuple[float, bool]:
+        """Get source pressure with smooth transition to reflecting BC.
+
+        After the pulse ends, smoothly blends from source pressure to
+        reflecting BC pressure, preventing the source from acting as a
+        pressure sink.
+
+        Args:
+            time: Current simulation time.
+            p_reflecting: Pressure value from reflecting BC (p_m at source nodes).
+
+        Returns:
+            Tuple of (blended_pressure, is_fully_reflecting).
+            If is_fully_reflecting is True, caller should skip source BC entirely.
+        """
+        blend = self.get_blend_factor(time)
+
+        if blend <= 0.0:
+            # Fully reflecting - caller should use reflecting BC
+            return p_reflecting, True
+
+        p_source = self.get_pressure(time)
+
+        if blend >= 1.0:
+            # Fully source BC
+            return p_source, False
+
+        # Blend between source and reflecting
+        return blend * p_source + (1.0 - blend) * p_reflecting, False

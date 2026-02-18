@@ -333,13 +333,13 @@ class NeuralNetworkModel(InverseModel):
             torch.nn.utils.clip_grad_norm_(self._model.parameters(), 1.0)
 
             # GradScaler may skip optimizer.step() if gradients contain inf/nan
-            # Check optimizer's step count to know if step() was actually called
-            optimizer_step_count_before = optimizer._step_count
+            # Track scale before step to detect if step was skipped
+            scale_before = scaler.get_scale()
             scaler.step(optimizer)
             scaler.update()
 
-            # Only step scheduler if optimizer actually stepped
-            if optimizer._step_count > optimizer_step_count_before:
+            # Only step scheduler if optimizer actually stepped (scale didn't change due to inf/nan)
+            if scaler.get_scale() >= scale_before:
                 scheduler.step()
 
             total_loss += loss.item() * X_batch.size(0)

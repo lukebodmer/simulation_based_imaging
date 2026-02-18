@@ -116,6 +116,8 @@ class VisualizeBatchPage:
         self.state.clim_max = 1.0
         self.state.auto_clim = False
         self.state.point_size = 8
+        self.state.show_inclusion = True
+        self.state.inclusion_opacity = 0.3
 
         # Refresh batch list on init
         self._refresh_batch_list()
@@ -132,6 +134,8 @@ class VisualizeBatchPage:
         self.state.change("clim_max")(self._on_visualization_setting_changed)
         self.state.change("auto_clim")(self._on_visualization_setting_changed)
         self.state.change("point_size")(self._on_visualization_setting_changed)
+        self.state.change("show_inclusion")(self._on_visualization_setting_changed)
+        self.state.change("inclusion_opacity")(self._on_visualization_setting_changed)
 
     def _refresh_batch_list(self):
         """Scan /data/simulations for available batches."""
@@ -460,15 +464,25 @@ class VisualizeBatchPage:
                 else:
                     clim = [float(self.state.clim_min), float(self.state.clim_max)]
 
-                self.plotter_sim.add_points(
-                    node_coordinates,
-                    scalars=pressure,
-                    cmap=colormap,
-                    opacity=opacity,
-                    clim=clim,
-                    point_size=point_size,
-                    render_points_as_spheres=True,
-                )
+                # Filter out points with near-zero pressure to avoid transparent dots
+                threshold = 0.01 * max(abs(clim[0]), abs(clim[1]))
+                mask = np.abs(pressure) > threshold
+
+                if np.any(mask):
+                    self.plotter_sim.add_points(
+                        node_coordinates[mask],
+                        scalars=pressure[mask],
+                        cmap=colormap,
+                        opacity=opacity,
+                        clim=clim,
+                        point_size=point_size,
+                        render_points_as_spheres=True,
+                        scalar_bar_args={"title": "Pressure"},
+                    )
+
+            # Add inclusion overlay if enabled
+            if self.state.show_inclusion:
+                self._add_inclusion_overlay()
 
             # Add sensors if available
             sensor_coords = self.timestep_data.get("sensor_coordinates", [])
@@ -491,6 +505,61 @@ class VisualizeBatchPage:
         except Exception as e:
             logger.error(f"Failed to update simulation plot: {e}")
 
+    def _add_inclusion_overlay(self):
+        """Add inclusion (wave speed) visualization as overlay on simulation plot."""
+        if self.mesh_data is None:
+            return
+
+        try:
+            # Get mesh data
+            if hasattr(self.mesh_data, "num_cells"):
+                num_cells = self.mesh_data.num_cells
+                cell_to_vertices = self._to_numpy(self.mesh_data.cell_to_vertices)
+                vertex_coordinates = self._to_numpy(self.mesh_data.vertex_coordinates)
+                speed = self._to_numpy(self.mesh_data.speed[0, :])
+            else:
+                num_cells = self.mesh_data["num_cells"]
+                cell_to_vertices = self._to_numpy(self.mesh_data["cell_to_vertices"])
+                vertex_coordinates = self._to_numpy(
+                    self.mesh_data["vertex_coordinates"]
+                )
+                speed = self._to_numpy(self.mesh_data["speed_per_cell"])
+
+            # Find inclusion cells (cells with different wave speed)
+            background_speed = np.median(speed)
+            inclusion_mask = np.abs(speed - background_speed) > 0.01 * background_speed
+
+            if not np.any(inclusion_mask):
+                return
+
+            # Extract inclusion cells
+            inclusion_cells = cell_to_vertices[inclusion_mask]
+            inclusion_speeds = speed[inclusion_mask]
+            num_inclusion_cells = len(inclusion_cells)
+
+            # Build tetrahedral grid for inclusion only
+            cell_conn = np.hstack(
+                [np.full((num_inclusion_cells, 1), 4), inclusion_cells]
+            ).ravel()
+            cell_types = np.full(num_inclusion_cells, pv.CellType.TETRA, dtype=np.uint8)
+
+            grid = pv.UnstructuredGrid(cell_conn, cell_types, vertex_coordinates)
+            grid.cell_data["speed"] = inclusion_speeds
+
+            # Add as surface mesh with transparency
+            inclusion_opacity = float(self.state.inclusion_opacity)
+            self.plotter_sim.add_mesh(
+                grid,
+                scalars="speed",
+                cmap="viridis",
+                opacity=inclusion_opacity,
+                show_edges=False,
+                scalar_bar_args={"title": "Wave Speed", "position_x": 0.85},
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to add inclusion overlay: {e}")
+
     def _update_sensor_plot(self):
         """Update the sensor data matrix plot."""
         if self.sensor_matrix_widget is None:
@@ -504,14 +573,13 @@ class VisualizeBatchPage:
             data_matrix = self._to_numpy(self.sensor_data["pressure"])
 
             fig, ax = plt.subplots(figsize=(8, 4))
-            vmax = np.abs(data_matrix).max() or 1.0
             cax = ax.imshow(
                 data_matrix,
                 aspect="auto",
                 cmap="seismic",
                 origin="lower",
-                vmin=-vmax,
-                vmax=vmax,
+                vmin=-1.0,
+                vmax=1.0,
             )
             ax.set_ylabel("Sensor Index")
             ax.set_xlabel("Time Step Index")
@@ -862,6 +930,27 @@ class VisualizeBatchPage:
                                         density="compact",
                                         hide_details=True,
                                         thumb_label=True,
+                                        style="min-width: 120px;",
+                                    )
+                                v3.VDivider(vertical=True, classes="mx-2")
+                                with v3.VCol(cols="auto"):
+                                    v3.VCheckbox(
+                                        v_model=("show_inclusion",),
+                                        label="Show Inclusion",
+                                        density="compact",
+                                        hide_details=True,
+                                    )
+                                with v3.VCol(cols="auto"):
+                                    v3.VSlider(
+                                        v_model=("inclusion_opacity",),
+                                        label="Inclusion α",
+                                        min=0.0,
+                                        max=1.0,
+                                        step=0.1,
+                                        density="compact",
+                                        hide_details=True,
+                                        thumb_label=True,
+                                        disabled=("!show_inclusion",),
                                         style="min-width: 120px;",
                                     )
                         # PyVista view - use calc to subtract toolbar height
