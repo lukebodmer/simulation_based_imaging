@@ -117,22 +117,35 @@ def generate_sensor_grid(
     margin = box_size * 0.2
     coords = np.linspace(origin + margin, origin + box_size - margin, grid_n)
 
-    # Z faces (bottom and top)
+    # Group sensors by face (not interleaved) for correct visualization
+    # Face 0: Z-bottom (z=origin)
     for xi in coords:
         for yi in coords:
             sensors.append((xi, yi, origin))
+
+    # Face 1: Z-top (z=origin+box_size)
+    for xi in coords:
+        for yi in coords:
             sensors.append((xi, yi, origin + box_size))
 
-    # Y faces (front and back)
+    # Face 2: Y-front (y=origin)
     for xi in coords:
         for zi in coords:
             sensors.append((xi, origin, zi))
+
+    # Face 3: Y-back (y=origin+box_size)
+    for xi in coords:
+        for zi in coords:
             sensors.append((xi, origin + box_size, zi))
 
-    # X faces (left and right)
+    # Face 4: X-left (x=origin)
     for yi in coords:
         for zi in coords:
             sensors.append((origin, yi, zi))
+
+    # Face 5: X-right (x=origin+box_size)
+    for yi in coords:
+        for zi in coords:
             sensors.append((origin + box_size, yi, zi))
 
     # Filter out sensors in excluded regions (near sources)
@@ -1005,12 +1018,12 @@ def create_video_with_sensors_3d(
 
                 # Draw face separator lines
                 if sensors_per_face is not None:
-                    line_color = NORD_COLORS["nord3"] if use_nord_style else "gray"
+                    line_color = NORD_COLORS["nord4"] if use_nord_style else "white"
                     num_faces = sensor_matrix.shape[0] // sensors_per_face
                     for face_idx in range(1, num_faces):
                         y_line = face_idx * sensors_per_face
                         ax_sensor.axhline(
-                            y=y_line, color=line_color, linewidth=0.5, linestyle="-"
+                            y=y_line, color=line_color, linewidth=1.0, alpha=0.7
                         )
 
                 cbar = plt.colorbar(
@@ -1290,12 +1303,12 @@ def render_dev_frame(
 
         # Draw face separator lines
         if sensors_per_face is not None and sensors_per_face > 0:
-            line_color = NORD_COLORS["nord3"]
+            line_color = NORD_COLORS["nord4"]
             num_faces = sensor_matrix.shape[0] // sensors_per_face
             for face_idx in range(1, num_faces):
                 y_line = face_idx * sensors_per_face
                 ax_sensor.axhline(
-                    y=y_line, color=line_color, linewidth=0.5, linestyle="-"
+                    y=y_line, color=line_color, linewidth=1.0, alpha=0.7
                 )
 
         cbar = plt.colorbar(

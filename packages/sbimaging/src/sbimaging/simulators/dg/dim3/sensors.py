@@ -180,19 +180,35 @@ def generate_grid_sensors(
     margin = box_size * 0.2  # 20% margin from edges
     coords = np.linspace(margin, box_size - margin, grid_n)
 
+    # Group sensors by face (not interleaved) for correct visualization
+    # Face 0: Z-bottom (z=0)
     for x in coords:
         for y in coords:
             sensors.append((x, y, 0.0))
+
+    # Face 1: Z-top (z=box_size)
+    for x in coords:
+        for y in coords:
             sensors.append((x, y, box_size))
 
+    # Face 2: Y-front (y=0)
     for x in coords:
         for z in coords:
             sensors.append((x, 0.0, z))
+
+    # Face 3: Y-back (y=box_size)
+    for x in coords:
+        for z in coords:
             sensors.append((x, box_size, z))
 
+    # Face 4: X-left (x=0)
     for y in coords:
         for z in coords:
             sensors.append((0.0, y, z))
+
+    # Face 5: X-right (x=box_size)
+    for y in coords:
+        for z in coords:
             sensors.append((box_size, y, z))
 
     if exclude_regions:

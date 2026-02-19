@@ -389,6 +389,45 @@ export function HomePage() {
               ]}
             />
           </div>
+
+          <div className={styles.subslide}>
+            <h3 className={styles.subslideTitle}>Batch Simulation Results</h3>
+            <ImageCarousel
+              compact
+              images={[
+                {
+                  src: "/images/3d_batch_grid_01.png",
+                  title: "Batch Results (1/5)",
+                  description:
+                    "3D inclusion geometries and corresponding sensor recordings. Left: tetrahedral mesh with embedded inclusion (yellow). Right: sensor measurements from all six faces of the cubic domain, grouped by face.",
+                },
+                {
+                  src: "/images/3d_batch_grid_02.png",
+                  title: "Batch Results (2/5)",
+                  description:
+                    "Additional simulation pairs showing varied inclusion positions. The sensor recordings capture wave reflections and transmissions as acoustic pulses interact with each inclusion.",
+                },
+                {
+                  src: "/images/3d_batch_grid_03.png",
+                  title: "Batch Results (3/5)",
+                  description:
+                    "The horizontal lines in the sensor plots demarcate the six faces of the cube. Each face region shows distinct wave arrival patterns depending on inclusion location.",
+                },
+                {
+                  src: "/images/3d_batch_grid_04.png",
+                  title: "Batch Results (4/5)",
+                  description:
+                    "Different inclusion configurations produce unique sensor signatures. These patterns form the training data for the inverse problem.",
+                },
+                {
+                  src: "/images/3d_batch_grid_05.png",
+                  title: "Batch Results (5/5)",
+                  description:
+                    "Final batch samples. The neural network learns to map these 3D sensor measurements back to inclusion geometry.",
+                },
+              ]}
+            />
+          </div>
         </section>
 
         <section id="results" className={styles.section}>
