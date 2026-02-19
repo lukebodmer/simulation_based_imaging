@@ -9,6 +9,7 @@ interface VideoItem {
 
 interface VideoCarouselProps {
   videos: VideoItem[];
+  hideText?: boolean;
 }
 
 function ArrowIcon({ direction }: { direction: "left" | "right" }) {
@@ -32,7 +33,7 @@ function ArrowIcon({ direction }: { direction: "left" | "right" }) {
   );
 }
 
-export function VideoCarousel({ videos }: VideoCarouselProps) {
+export function VideoCarousel({ videos, hideText = false }: VideoCarouselProps) {
   const [currentIndex, setCurrentIndex] = useState(0);
 
   function goToPrevious() {
@@ -79,10 +80,12 @@ export function VideoCarousel({ videos }: VideoCarouselProps) {
         </button>
       </div>
 
-      <div className={styles.info}>
-        <h3 className={styles.videoTitle}>{currentVideo.title}</h3>
-        <p className={styles.videoDescription}>{currentVideo.description}</p>
-      </div>
+      {!hideText && (
+        <div className={styles.info}>
+          <h3 className={styles.videoTitle}>{currentVideo.title}</h3>
+          <p className={styles.videoDescription}>{currentVideo.description}</p>
+        </div>
+      )}
 
       <div className={styles.indicators}>
         {videos.map((_, index) => (

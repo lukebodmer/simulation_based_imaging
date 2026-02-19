@@ -239,6 +239,7 @@ class SimulationRunner:
             self._output.initialize_sensors(
                 sensor_names=["pressure"],
                 num_sensors=self._sensors.num_sensors,
+                sensor_locations=self._sensors.locations,
             )
 
         if out.energy_interval > 0:

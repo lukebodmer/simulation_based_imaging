@@ -1263,9 +1263,10 @@ class RunBatchPage:
 
     def _build_simulation_config(self) -> SimulationConfig:
         """Build SimulationConfig from current UI state."""
-        sources = self.state.sources
+        source_count = int(self.state.source_count)
+        sources = self.state.sources[:source_count]
         source_config = SourceConfig(
-            number=int(self.state.source_count),
+            number=source_count,
             centers=[s["center"] for s in sources],
             radii=[s["radius"] for s in sources],
             amplitudes=[s["amplitude"] for s in sources],

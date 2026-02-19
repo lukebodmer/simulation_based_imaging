@@ -78,17 +78,21 @@ class SimulationOutput:
         self,
         sensor_names: list[str],
         num_sensors: int,
+        sensor_locations: np.ndarray | None = None,
     ) -> None:
         """Initialize sensor data arrays.
 
         Args:
             sensor_names: Names of tracked sensor fields.
             num_sensors: Number of sensors.
+            sensor_locations: Optional (num_sensors, 3) array of sensor coordinates.
         """
         for name in sensor_names:
             self._sensor_data[name] = np.zeros(
                 (num_sensors, self._num_sensor_readings)
             )
+        if sensor_locations is not None:
+            self._sensor_data["locations"] = sensor_locations
 
     def start(self) -> None:
         """Mark simulation start time."""

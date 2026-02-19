@@ -10,10 +10,11 @@ import tempfile
 from pathlib import Path
 
 import matplotlib
+import toml
 
 matplotlib.use("Agg")  # Non-interactive backend for rendering
-import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
+import matplotlib.pyplot as plt
 import numpy as np
 import pyvista as pv
 
@@ -45,37 +46,43 @@ NORD_COLORS = {
 
 
 def create_nord_diverging_cmap() -> mcolors.LinearSegmentedColormap:
-    """Create a diverging colormap using Nord colors (blue-white-red)."""
+    """Create a diverging colormap using Nord colors (blue-dark-red).
+
+    Uses a dark center (nord1) instead of white for better visibility
+    on dark backgrounds.
+    """
     colors = [
-        NORD_COLORS["nord10"],
-        NORD_COLORS["nord8"],
-        NORD_COLORS["nord6"],
-        NORD_COLORS["nord12"],
-        NORD_COLORS["nord11"],
+        NORD_COLORS["nord10"],  # Dark blue (negative extreme)
+        NORD_COLORS["nord8"],  # Cyan (negative mid)
+        NORD_COLORS["nord1"],  # Dark gray (zero/center)
+        NORD_COLORS["nord12"],  # Orange (positive mid)
+        NORD_COLORS["nord11"],  # Red (positive extreme)
     ]
     return mcolors.LinearSegmentedColormap.from_list("nord_diverging", colors)
 
 
 def apply_nord_style() -> None:
     """Apply Nord-themed matplotlib style settings."""
-    plt.rcParams.update({
-        "figure.facecolor": NORD_COLORS["nord0"],
-        "figure.edgecolor": NORD_COLORS["nord0"],
-        "axes.facecolor": NORD_COLORS["nord1"],
-        "axes.edgecolor": NORD_COLORS["nord3"],
-        "axes.labelcolor": NORD_COLORS["nord4"],
-        "axes.titlecolor": NORD_COLORS["nord6"],
-        "axes.titleweight": "medium",
-        "axes.titlesize": 11,
-        "axes.labelsize": 9,
-        "xtick.color": NORD_COLORS["nord4"],
-        "ytick.color": NORD_COLORS["nord4"],
-        "xtick.labelsize": 8,
-        "ytick.labelsize": 8,
-        "text.color": NORD_COLORS["nord6"],
-        "savefig.facecolor": NORD_COLORS["nord0"],
-        "savefig.edgecolor": NORD_COLORS["nord0"],
-    })
+    plt.rcParams.update(
+        {
+            "figure.facecolor": NORD_COLORS["nord0"],
+            "figure.edgecolor": NORD_COLORS["nord0"],
+            "axes.facecolor": NORD_COLORS["nord1"],
+            "axes.edgecolor": NORD_COLORS["nord3"],
+            "axes.labelcolor": NORD_COLORS["nord4"],
+            "axes.titlecolor": NORD_COLORS["nord6"],
+            "axes.titleweight": "medium",
+            "axes.titlesize": 11,
+            "axes.labelsize": 9,
+            "xtick.color": NORD_COLORS["nord4"],
+            "ytick.color": NORD_COLORS["nord4"],
+            "xtick.labelsize": 8,
+            "ytick.labelsize": 8,
+            "text.color": NORD_COLORS["nord6"],
+            "savefig.facecolor": NORD_COLORS["nord0"],
+            "savefig.edgecolor": NORD_COLORS["nord0"],
+        }
+    )
 
 
 def to_numpy(array):
@@ -85,6 +92,66 @@ def to_numpy(array):
     return np.asarray(array)
 
 
+def generate_sensor_grid(
+    box_size: float,
+    sensors_per_face: int,
+    origin: float = 0.0,
+    exclude_regions: list[tuple[tuple[float, float, float], float]] | None = None,
+) -> list[tuple[float, float, float]]:
+    """Generate sensor grid on domain boundary faces.
+
+    Args:
+        box_size: Size of cubic domain.
+        sensors_per_face: Total number of sensors per face (must be a perfect square).
+        origin: Minimum coordinate value (domain goes from origin to origin+box_size).
+        exclude_regions: List of (center, radius) tuples for excluded regions.
+
+    Returns:
+        List of (x, y, z) sensor coordinates.
+    """
+    grid_n = int(np.sqrt(sensors_per_face))
+    if grid_n * grid_n != sensors_per_face:
+        grid_n = max(1, round(np.sqrt(sensors_per_face)))
+
+    sensors = []
+    margin = box_size * 0.2
+    coords = np.linspace(origin + margin, origin + box_size - margin, grid_n)
+
+    # Z faces (bottom and top)
+    for xi in coords:
+        for yi in coords:
+            sensors.append((xi, yi, origin))
+            sensors.append((xi, yi, origin + box_size))
+
+    # Y faces (front and back)
+    for xi in coords:
+        for zi in coords:
+            sensors.append((xi, origin, zi))
+            sensors.append((xi, origin + box_size, zi))
+
+    # X faces (left and right)
+    for yi in coords:
+        for zi in coords:
+            sensors.append((origin, yi, zi))
+            sensors.append((origin + box_size, yi, zi))
+
+    # Filter out sensors in excluded regions (near sources)
+    if exclude_regions:
+        filtered = []
+        for sx, sy, sz in sensors:
+            excluded = False
+            for (cx, cy, cz), r in exclude_regions:
+                dist2 = (sx - cx) ** 2 + (sy - cy) ** 2 + (sz - cz) ** 2
+                if dist2 < r**2:
+                    excluded = True
+                    break
+            if not excluded:
+                filtered.append((sx, sy, sz))
+        sensors = filtered
+
+    return sensors
+
+
 def load_simulation_data(sim_dir: Path) -> dict:
     """Load all simulation data from a directory.
 
@@ -92,7 +159,7 @@ def load_simulation_data(sim_dir: Path) -> dict:
         sim_dir: Simulation output directory.
 
     Returns:
-        Dictionary with mesh, timestep files, sensor data, and energy data.
+        Dictionary with mesh, timestep files, sensor data, energy data, and config.
     """
     logger = get_logger(__name__)
 
@@ -101,6 +168,7 @@ def load_simulation_data(sim_dir: Path) -> dict:
         "timestep_files": [],
         "sensor_data": None,
         "energy_data": None,
+        "config": None,
     }
 
     # Load mesh
@@ -130,6 +198,12 @@ def load_simulation_data(sim_dir: Path) -> dict:
             result["energy_data"] = pickle.load(f)
         logger.info(f"Loaded energy data from {energy_file}")
 
+    # Load config
+    config_file = sim_dir / "config.toml"
+    if config_file.exists():
+        result["config"] = toml.load(config_file)
+        logger.info(f"Loaded config from {config_file}")
+
     return result
 
 
@@ -138,7 +212,9 @@ def compute_camera_position_from_angles(
     radius: float,
     azimuth: float,
     elevation: float,
-) -> tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]:
+) -> tuple[
+    tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]
+]:
     """Compute camera position from azimuth and elevation angles.
 
     Args:
@@ -171,7 +247,9 @@ def compute_camera_position(
     radius: float,
     elevation: float = 30.0,
     num_orbits: float = 1.0,
-) -> tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]:
+) -> tuple[
+    tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]
+]:
     """Compute camera position for orbiting view.
 
     Args:
@@ -234,11 +312,13 @@ def generate_frame_schedule(
     for i in range(pause_sim_idx):
         progress = i / num_sim_frames
         azimuth = progress * 360.0 * num_orbits
-        schedule.append({
-            "sim_idx": i,
-            "azimuth": azimuth,
-            "elevation": elevation_start,
-        })
+        schedule.append(
+            {
+                "sim_idx": i,
+                "azimuth": azimuth,
+                "elevation": elevation_start,
+            }
+        )
 
     # Phase 2: Simulation paused, camera pans
     pause_azimuth_start = phase1_orbit_fraction * 360.0 * num_orbits
@@ -252,11 +332,13 @@ def generate_frame_schedule(
         azimuth = pause_azimuth_start + t_smooth * pan_arc_degrees
         elevation = elevation_start + t_smooth * (elevation_end - elevation_start)
 
-        schedule.append({
-            "sim_idx": pause_sim_idx,  # Frozen simulation
-            "azimuth": azimuth,
-            "elevation": elevation,
-        })
+        schedule.append(
+            {
+                "sim_idx": pause_sim_idx,  # Frozen simulation
+                "azimuth": azimuth,
+                "elevation": elevation,
+            }
+        )
 
     # Phase 3: Simulation resumes
     # Adjust orbit to account for the pan arc we just did
@@ -267,14 +349,18 @@ def generate_frame_schedule(
         sim_idx = pause_sim_idx + i
         # Progress from pause point to end
         progress = i / remaining_sim_frames if remaining_sim_frames > 0 else 0
-        remaining_orbit = (1.0 - pause_at_fraction) * 360.0 * num_orbits - pan_arc_degrees
+        remaining_orbit = (
+            1.0 - pause_at_fraction
+        ) * 360.0 * num_orbits - pan_arc_degrees
         azimuth = resume_azimuth + progress * remaining_orbit
 
-        schedule.append({
-            "sim_idx": sim_idx,
-            "azimuth": azimuth,
-            "elevation": elevation_end,
-        })
+        schedule.append(
+            {
+                "sim_idx": sim_idx,
+                "azimuth": azimuth,
+                "elevation": elevation_end,
+            }
+        )
 
     # Phase 4: Final pause at last frame while camera continues orbiting
     if final_orbit_seconds > 0:
@@ -291,11 +377,13 @@ def generate_frame_schedule(
         for i in range(final_orbit_frames):
             azimuth = final_start_azimuth + (i + 1) * degrees_per_frame
 
-            schedule.append({
-                "sim_idx": last_sim_idx,
-                "azimuth": azimuth,
-                "elevation": elevation_end,
-            })
+            schedule.append(
+                {
+                    "sim_idx": last_sim_idx,
+                    "azimuth": azimuth,
+                    "elevation": elevation_end,
+                }
+            )
 
     return schedule
 
@@ -320,7 +408,7 @@ def add_inclusion_mesh(
         color: Solid color for inclusion. Defaults to Nord frost (light cyan).
     """
     if color is None:
-        color = NORD_COLORS["nord8"]  # Light cyan/frost color
+        color = NORD_COLORS["nord13"]  # Yellow
 
     cell_to_vertices = to_numpy(mesh["cell_to_vertices"])
     vertex_coordinates = to_numpy(mesh["vertex_coordinates"])
@@ -371,6 +459,7 @@ def render_3d_frame(
     mesh: dict | None = None,
     show_inclusion: bool = True,
     inclusion_opacity: float = 0.3,
+    sensor_locations: np.ndarray | None = None,
 ) -> np.ndarray | None:
     """Render a single 3D frame.
 
@@ -388,6 +477,7 @@ def render_3d_frame(
         mesh: Mesh data dictionary (for inclusion overlay).
         show_inclusion: Whether to show the inclusion overlay.
         inclusion_opacity: Opacity for the inclusion mesh.
+        sensor_locations: Optional (N, 3) array of sensor coordinates to display.
 
     Returns:
         Rendered image as numpy array.
@@ -425,6 +515,183 @@ def render_3d_frame(
     if show_inclusion and mesh is not None:
         add_inclusion_mesh(plotter, mesh, opacity=inclusion_opacity)
 
+    # Add sensor locations as black dots
+    if sensor_locations is not None and len(sensor_locations) > 0:
+        plotter.add_points(
+            sensor_locations,
+            color="black",
+            point_size=8,
+            render_points_as_spheres=True,
+        )
+
+    # Set camera
+    plotter.camera_position = [camera_position, focal_point, view_up]
+
+    # Add bounding box for reference
+    plotter.add_bounding_box(color="gray", line_width=1)  # type: ignore[call-arg]
+
+    # Render and capture
+    plotter.render()
+    image = plotter.screenshot(return_img=True)
+
+    return image
+
+
+def build_tetrahedral_grid(
+    mesh: dict,
+    pressure: np.ndarray,
+) -> pv.UnstructuredGrid:
+    """Build a PyVista UnstructuredGrid from tetrahedral mesh data.
+
+    The DG method stores field values at nodal points within each cell, not at
+    mesh vertices. This function interpolates from DG nodes to mesh vertices
+    by averaging values from cells sharing each vertex.
+
+    Args:
+        mesh: Mesh data dictionary with cell_to_vertices, vertex_coordinates,
+              and DG node coordinates (x, y, z).
+        pressure: Pressure values at DG nodes (flattened, Fortran order).
+
+    Returns:
+        PyVista UnstructuredGrid with pressure interpolated to vertices.
+    """
+    cell_to_vertices = to_numpy(mesh["cell_to_vertices"])
+    vertex_coordinates = to_numpy(mesh["vertex_coordinates"])
+    num_cells = len(cell_to_vertices)
+    num_vertices = len(vertex_coordinates)
+
+    # Get DG node coordinates
+    x_dg = to_numpy(mesh["x"])  # Shape: (Np, num_cells)
+    y_dg = to_numpy(mesh["y"])
+    z_dg = to_numpy(mesh["z"])
+
+    # Reshape pressure to match DG node layout (Np, num_cells)
+    np_nodes = x_dg.shape[0]  # Number of DG nodes per cell
+    pressure_2d = pressure.reshape((np_nodes, num_cells), order="F")
+
+    # Interpolate DG node values to mesh vertices
+    # For each vertex, find cells that contain it and average the nearest DG node values
+    vertex_pressure = np.zeros(num_vertices)
+    vertex_counts = np.zeros(num_vertices)
+
+    for cell_idx in range(num_cells):
+        cell_verts = cell_to_vertices[cell_idx]  # 4 vertex indices
+        cell_x = x_dg[:, cell_idx]
+        cell_y = y_dg[:, cell_idx]
+        cell_z = z_dg[:, cell_idx]
+        cell_p = pressure_2d[:, cell_idx]
+
+        for vert_idx in cell_verts:
+            # Find the DG node closest to this vertex
+            vx, vy, vz = vertex_coordinates[vert_idx]
+            distances = (cell_x - vx) ** 2 + (cell_y - vy) ** 2 + (cell_z - vz) ** 2
+            nearest_node = np.argmin(distances)
+
+            vertex_pressure[vert_idx] += cell_p[nearest_node]
+            vertex_counts[vert_idx] += 1
+
+    # Average contributions from multiple cells
+    vertex_counts[vertex_counts == 0] = 1  # Avoid division by zero
+    vertex_pressure /= vertex_counts
+
+    # Build cell connectivity array for PyVista
+    cell_conn = np.hstack([np.full((num_cells, 1), 4), cell_to_vertices]).ravel()
+    cell_types = np.full(num_cells, pv.CellType.TETRA, dtype=np.uint8)
+
+    grid = pv.UnstructuredGrid(cell_conn, cell_types, vertex_coordinates)
+    grid.point_data["pressure"] = vertex_pressure
+
+    return grid
+
+
+def render_3d_frame_isosurface(
+    plotter: pv.Plotter,
+    mesh: dict,
+    pressure: np.ndarray,
+    camera_position: tuple,
+    focal_point: tuple,
+    view_up: tuple,
+    isosurface_levels: list[float] | None = None,
+    clim: tuple[float, float] = (-0.5, 0.5),
+    cmap: str = "RdBu_r",
+    isosurface_opacity: float = 0.7,
+    show_inclusion: bool = True,
+    inclusion_opacity: float = 0.3,
+    sensor_locations: np.ndarray | None = None,
+) -> np.ndarray | None:
+    """Render a single 3D frame using isosurfaces.
+
+    Args:
+        plotter: PyVista plotter.
+        mesh: Mesh data dictionary with cell_to_vertices and vertex_coordinates.
+        pressure: Pressure values at vertices.
+        camera_position: Camera position.
+        focal_point: Camera focal point.
+        view_up: Camera up vector.
+        isosurface_levels: Pressure values for isosurfaces. Defaults to symmetric levels.
+        clim: Color limits (min, max) for coloring isosurfaces.
+        cmap: Colormap name.
+        isosurface_opacity: Opacity for isosurface meshes.
+        show_inclusion: Whether to show the inclusion overlay.
+        inclusion_opacity: Opacity for the inclusion mesh.
+        sensor_locations: Optional (N, 3) array of sensor coordinates to display.
+
+    Returns:
+        Rendered image as numpy array.
+    """
+    plotter.clear()
+
+    # Default isosurface levels: symmetric positive and negative
+    if isosurface_levels is None:
+        max_val = max(abs(clim[0]), abs(clim[1]))
+        isosurface_levels = [
+            -0.5 * max_val,
+            -0.2 * max_val,
+            -0.08 * max_val,
+            0.08 * max_val,
+            0.2 * max_val,
+            0.5 * max_val,
+        ]
+
+    # Build tetrahedral grid with pressure data
+    grid = build_tetrahedral_grid(mesh, pressure)
+
+    # Extract isosurfaces
+    try:
+        contours = grid.contour(isosurfaces=isosurface_levels, scalars="pressure")
+        if contours.n_points > 0:
+            plotter.add_mesh(
+                contours,
+                scalars="pressure",
+                cmap=cmap,
+                clim=clim,
+                opacity=isosurface_opacity,
+                show_scalar_bar=False,
+                smooth_shading=True,
+                ambient=1.0,
+                diffuse=0.9,
+                specular=0.1,
+            )
+    except Exception:
+        # No isosurfaces found (pressure values don't cross the levels)
+        pass
+
+    # Add brighter lighting for isosurfaces
+    plotter.enable_3_lights()
+
+    # Add inclusion overlay
+    if show_inclusion and mesh is not None:
+        add_inclusion_mesh(plotter, mesh, opacity=inclusion_opacity)
+
+    # Add sensor locations as black dots
+    if sensor_locations is not None and len(sensor_locations) > 0:
+        plotter.add_points(
+            sensor_locations,
+            color="black",
+            point_size=8,
+            render_points_as_spheres=True,
+        )
+
     # Set camera
     plotter.camera_position = [camera_position, focal_point, view_up]
 
@@ -441,10 +708,10 @@ def render_3d_frame(
 def create_video_with_sensors_3d(
     sim_dir: Path | str,
     output_file: Path | str,
-    vmin: float = -0.5,
-    vmax: float = 0.5,
+    vmin: float = -1.0,
+    vmax: float = 1.0,
     fps: int = 30,
-    dpi: int = 150,
+    dpi: int = 240,
     figsize: tuple[float, float] = (16, 6),
     point_size: float = 5.0,
     camera_radius: float = 2.5,
@@ -460,7 +727,10 @@ def create_video_with_sensors_3d(
     pan_frames: int = 60,
     pan_arc_degrees: float = 90.0,
     pan_elevation_end: float = 45.0,
-    final_orbit_seconds: float = 2.0,
+    final_orbit_seconds: float = 4.0,
+    render_mode: str = "points",
+    isosurface_levels: list[float] | None = None,
+    isosurface_opacity: float = 0.7,
 ) -> bool:
     """Create video with 3D simulation and sensor data side by side.
 
@@ -487,6 +757,9 @@ def create_video_with_sensors_3d(
         pan_arc_degrees: Degrees of arc to pan during pause.
         pan_elevation_end: Camera elevation after pan completes.
         final_orbit_seconds: Seconds of orbiting at last simulation frame.
+        render_mode: Rendering mode - "points" for point cloud, "isosurface" for isosurfaces.
+        isosurface_levels: Pressure values for isosurfaces (only used if render_mode="isosurface").
+        isosurface_opacity: Opacity for isosurface meshes.
 
     Returns:
         True if video was created successfully.
@@ -529,7 +802,7 @@ def create_video_with_sensors_3d(
 
     logger.info(f"Color scale: [{vmin:.4g}, {vmax:.4g}]")
 
-    # Get sensor data matrix
+    # Get sensor data matrix and locations
     if sensor_data is not None and "pressure" in sensor_data:
         sensor_matrix = to_numpy(sensor_data["pressure"])
         sensor_vmax = np.abs(sensor_matrix).max() if sensor_matrix.size > 0 else 1.0
@@ -537,18 +810,57 @@ def create_video_with_sensors_3d(
         sensor_matrix = None
         sensor_vmax = 1.0
 
+    # Get sensor locations if available, or compute from config/sensors_per_face
+    config = data.get("config")
+
+    # Try to get sensors_per_face from config if not provided
+    if sensors_per_face is None and config is not None:
+        receivers = config.get("receivers", {})
+        sensors_per_face = receivers.get("sensors_per_face")
+
+    if sensor_data is not None and "locations" in sensor_data:
+        sensor_locations = to_numpy(sensor_data["locations"])
+        logger.info(f"Found {len(sensor_locations)} sensor locations in data")
+    elif sensors_per_face is not None:
+        # Compute sensor locations from mesh bounds and sensors_per_face
+        box_size = x.max() - x.min()  # Assume cubic domain
+
+        # Get source exclusion regions from config
+        exclude_regions = None
+        if config is not None and "sources" in config:
+            src = config["sources"]
+            centers = src.get("centers", [])
+            radii = src.get("radii", [])
+            if centers and radii:
+                exclude_regions = [
+                    (tuple(c), r) for c, r in zip(centers, radii, strict=False)
+                ]
+
+        sensor_locations = np.array(
+            generate_sensor_grid(box_size, sensors_per_face, x.min(), exclude_regions)
+        )
+        logger.info(f"Generated {len(sensor_locations)} sensor locations from grid")
+    else:
+        sensor_locations = None
+
     # Apply styling
     if use_nord_style:
         apply_nord_style()
         field_cmap = create_nord_diverging_cmap()
-        cmap_name = "seismic"  # PyVista uses string names
+        # Register the Nord colormap with matplotlib so PyVista can use it
+        plt.colormaps.register(field_cmap, name="nord_diverging", force=True)
+        cmap_name = "nord_diverging"
     else:
         field_cmap = "RdBu_r"
         cmap_name = "RdBu_r"
 
     # Create PyVista plotter
+    # Window size should match the aspect ratio of half the figure (since we have 2 panels)
+    # Use a slightly taller height to match the sensor plot area (which has axes/labels)
     if window_size is None:
-        window_size = [800, 600]
+        panel_width = int(figsize[0] / 2 * dpi)
+        panel_height = int(figsize[1] * dpi * 1.1)
+        window_size = [panel_width, panel_height]
     plotter = pv.Plotter(off_screen=True, window_size=window_size)
     plotter.set_background(NORD_COLORS["nord0"] if use_nord_style else "white")  # type: ignore[arg-type]
 
@@ -575,11 +887,13 @@ def create_video_with_sensors_3d(
         for i in range(len(timestep_files)):
             progress = i / len(timestep_files)
             azimuth = progress * 360.0 * num_orbits
-            frame_schedule.append({
-                "sim_idx": i,
-                "azimuth": azimuth,
-                "elevation": camera_elevation,
-            })
+            frame_schedule.append(
+                {
+                    "sim_idx": i,
+                    "azimuth": azimuth,
+                    "elevation": camera_elevation,
+                }
+            )
         logger.info(f"Rendering {len(frame_schedule)} frames...")
 
     # Pre-load timestep data for efficiency
@@ -615,22 +929,40 @@ def create_video_with_sensors_3d(
             )
 
             # Render 3D view
-            image_3d = render_3d_frame(
-                plotter=plotter,
-                x=x,
-                y=y,
-                z=z,
-                pressure=pressure,
-                camera_position=camera_pos,
-                focal_point=focal_point,
-                view_up=view_up,
-                clim=(vmin, vmax),
-                point_size=point_size,
-                cmap=cmap_name,
-                mesh=mesh if show_inclusion else None,
-                show_inclusion=show_inclusion,
-                inclusion_opacity=inclusion_opacity,
-            )
+            if render_mode == "isosurface":
+                image_3d = render_3d_frame_isosurface(
+                    plotter=plotter,
+                    mesh=mesh,
+                    pressure=pressure,
+                    camera_position=camera_pos,
+                    focal_point=focal_point,
+                    view_up=view_up,
+                    isosurface_levels=isosurface_levels,
+                    clim=(vmin, vmax),
+                    cmap=cmap_name,
+                    isosurface_opacity=isosurface_opacity,
+                    show_inclusion=show_inclusion,
+                    inclusion_opacity=inclusion_opacity,
+                    sensor_locations=sensor_locations,
+                )
+            else:
+                image_3d = render_3d_frame(
+                    plotter=plotter,
+                    x=x,
+                    y=y,
+                    z=z,
+                    pressure=pressure,
+                    camera_position=camera_pos,
+                    focal_point=focal_point,
+                    view_up=view_up,
+                    clim=(vmin, vmax),
+                    point_size=point_size,
+                    cmap=cmap_name,
+                    mesh=mesh if show_inclusion else None,
+                    show_inclusion=show_inclusion,
+                    inclusion_opacity=inclusion_opacity,
+                    sensor_locations=sensor_locations,
+                )
 
             if image_3d is None:
                 logger.error(f"Failed to render frame {frame_idx}")
@@ -644,7 +976,7 @@ def create_video_with_sensors_3d(
             ax_3d = fig.add_subplot(gs[0])
             ax_3d.imshow(image_3d)
             ax_3d.axis("off")
-            ax_3d.set_title(f"3D Pressure Field (t = {time:.4f} s)")
+            ax_3d.set_title(f"3D Pressure Field (t = {time:.4f} s)", pad=5)
 
             # Right panel: Sensor data
             ax_sensor = fig.add_subplot(gs[1])
@@ -652,7 +984,7 @@ def create_video_with_sensors_3d(
             if sensor_matrix is not None:
                 # Map simulation index to sensor data index
                 sensor_idx = min(sim_idx, sensor_matrix.shape[1] - 1)
-                current_sensor_data = sensor_matrix[:, :sensor_idx + 1]
+                current_sensor_data = sensor_matrix[:, : sensor_idx + 1]
 
                 sensor_extent = (
                     0.0,
@@ -673,12 +1005,12 @@ def create_video_with_sensors_3d(
 
                 # Draw face separator lines
                 if sensors_per_face is not None:
-                    line_color = NORD_COLORS["nord6"] if use_nord_style else "white"
+                    line_color = NORD_COLORS["nord3"] if use_nord_style else "gray"
                     num_faces = sensor_matrix.shape[0] // sensors_per_face
                     for face_idx in range(1, num_faces):
                         y_line = face_idx * sensors_per_face
                         ax_sensor.axhline(
-                            y=y_line, color=line_color, linewidth=1.5, linestyle="-"
+                            y=y_line, color=line_color, linewidth=0.5, linestyle="-"
                         )
 
                 cbar = plt.colorbar(
@@ -690,6 +1022,14 @@ def create_video_with_sensors_3d(
                     shrink=0.8,
                 )
                 cbar.ax.tick_params(labelsize=7)
+                if use_nord_style:
+                    cbar.ax.yaxis.set_tick_params(color=NORD_COLORS["nord4"])
+                    cbar.outline.set_edgecolor(NORD_COLORS["nord3"])
+                    plt.setp(
+                        plt.getp(cbar.ax.axes, "yticklabels"),
+                        color=NORD_COLORS["nord4"],
+                    )
+                    cbar.set_label("Pressure", color=NORD_COLORS["nord4"])
 
                 ax_sensor.set_xlabel("Time Step")
                 ax_sensor.set_ylabel("Sensor Index")
@@ -718,6 +1058,286 @@ def create_video_with_sensors_3d(
 
         # Create video from images
         return create_video_from_images(temp_path, output_file, fps)
+
+
+def render_dev_frame(
+    sim_dir: Path | str,
+    output_file: Path | str,
+    vmin: float = -1.0,
+    vmax: float = 1.0,
+    render_mode: str = "points",
+    show_inclusion: bool = True,
+    inclusion_opacity: float = 0.3,
+    isosurface_opacity: float = 0.7,
+    camera_radius: float = 2.5,
+    camera_elevation: float = 35.0,
+    camera_azimuth: float = 45.0,
+) -> bool:
+    """Render a single frame from the middle of the simulation for quick testing.
+
+    Args:
+        sim_dir: Simulation output directory.
+        output_file: Output image file path (PNG).
+        vmin: Minimum value for pressure colormap.
+        vmax: Maximum value for pressure colormap.
+        render_mode: "points" or "isosurface".
+        show_inclusion: Whether to show the inclusion overlay.
+        inclusion_opacity: Opacity for the inclusion mesh.
+        isosurface_opacity: Opacity for isosurface meshes.
+        camera_radius: Distance of camera from center.
+        camera_elevation: Camera elevation angle in degrees.
+        camera_azimuth: Camera azimuth angle in degrees.
+
+    Returns:
+        True if frame was rendered successfully.
+    """
+    logger = get_logger(__name__)
+    sim_dir = Path(sim_dir)
+    output_file = Path(output_file)
+
+    # Ensure output is a PNG
+    if output_file.suffix.lower() != ".png":
+        output_file = output_file.with_suffix(".png")
+
+    # Load simulation data
+    data = load_simulation_data(sim_dir)
+
+    if data["mesh"] is None:
+        logger.error("No mesh data found")
+        return False
+
+    if not data["timestep_files"]:
+        logger.error("No timestep files found")
+        return False
+
+    mesh = data["mesh"]
+    timestep_files = data["timestep_files"]
+
+    # Pick middle timestep
+    mid_idx = len(timestep_files) // 2
+    logger.info(f"Rendering frame {mid_idx} of {len(timestep_files)} (dev mode)")
+
+    # Load timestep data
+    with open(timestep_files[mid_idx], "rb") as f:
+        ts_data = pickle.load(f)
+
+    pressure = to_numpy(ts_data["fields"]["p"]).ravel(order="F")
+
+    # Extract mesh coordinates
+    if isinstance(mesh, dict):
+        x = to_numpy(mesh["x"]).ravel(order="F")
+        y = to_numpy(mesh["y"]).ravel(order="F")
+        z = to_numpy(mesh["z"]).ravel(order="F")
+    else:
+        x = to_numpy(mesh.x).ravel(order="F")
+        y = to_numpy(mesh.y).ravel(order="F")
+        z = to_numpy(mesh.z).ravel(order="F")
+
+    center = (
+        (x.min() + x.max()) / 2,
+        (y.min() + y.max()) / 2,
+        (z.min() + z.max()) / 2,
+    )
+
+    # Get sensor locations if available, or try to compute from sensor matrix shape
+    sensor_data = data.get("sensor_data")
+    config = data.get("config")
+    sensors_per_face = None
+    if config is not None:
+        receivers = config.get("receivers", {})
+        sensors_per_face = receivers.get("sensors_per_face")
+    if sensor_data is not None and "locations" in sensor_data:
+        sensor_locations = to_numpy(sensor_data["locations"])
+        logger.info(f"Found {len(sensor_locations)} sensor locations in data")
+    elif sensor_data is not None and "pressure" in sensor_data:
+        # Try to infer sensors_per_face from total sensors (6 faces) if not in config
+        if sensors_per_face is None:
+            num_sensors = sensor_data["pressure"].shape[0]
+            sensors_per_face = num_sensors // 6
+        if sensors_per_face is not None and sensors_per_face > 0:
+            box_size = x.max() - x.min()
+
+            # Get source exclusion regions from config
+            exclude_regions = None
+            if config is not None and "sources" in config:
+                src = config["sources"]
+                centers = src.get("centers", [])
+                radii = src.get("radii", [])
+                if centers and radii:
+                    exclude_regions = [
+                        (tuple(c), r) for c, r in zip(centers, radii, strict=False)
+                    ]
+
+            sensor_locations = np.array(
+                generate_sensor_grid(box_size, sensors_per_face, x.min(), exclude_regions)
+            )
+            logger.info(f"Generated {len(sensor_locations)} sensor locations from grid")
+        else:
+            sensor_locations = None
+    else:
+        sensor_locations = None
+
+    # Get sensor matrix for the right panel
+    if sensor_data is not None and "pressure" in sensor_data:
+        sensor_matrix = to_numpy(sensor_data["pressure"])
+        sensor_vmax = np.abs(sensor_matrix).max() if sensor_matrix.size > 0 else 1.0
+    else:
+        sensor_matrix = None
+        sensor_vmax = 1.0
+
+    # Figure settings (same as main video)
+    figsize = (16, 6)
+    dpi = 240
+
+    # Apply Nord styling
+    apply_nord_style()
+    field_cmap = create_nord_diverging_cmap()
+    plt.colormaps.register(field_cmap, name="nord_diverging", force=True)
+    cmap_name = "nord_diverging"
+
+    # Create plotter with proper size for the panel
+    # Use a slightly taller height to match the sensor plot area (which has axes/labels)
+    panel_width = int(figsize[0] / 2 * dpi)
+    panel_height = int(figsize[1] * dpi * 1.1)
+    plotter = pv.Plotter(off_screen=True, window_size=[panel_width, panel_height])
+    plotter.set_background(NORD_COLORS["nord0"])
+
+    # Compute camera position
+    camera_pos, focal_point, view_up = compute_camera_position_from_angles(
+        center=center,
+        radius=camera_radius,
+        azimuth=camera_azimuth,
+        elevation=camera_elevation,
+    )
+
+    # Render based on mode
+    if render_mode == "isosurface":
+        image_3d = render_3d_frame_isosurface(
+            plotter=plotter,
+            mesh=mesh,
+            pressure=pressure,
+            camera_position=camera_pos,
+            focal_point=focal_point,
+            view_up=view_up,
+            clim=(vmin, vmax),
+            cmap=cmap_name,
+            isosurface_opacity=isosurface_opacity,
+            show_inclusion=show_inclusion,
+            inclusion_opacity=inclusion_opacity,
+            sensor_locations=sensor_locations,
+        )
+    else:
+        image_3d = render_3d_frame(
+            plotter=plotter,
+            x=x,
+            y=y,
+            z=z,
+            pressure=pressure,
+            camera_position=camera_pos,
+            focal_point=focal_point,
+            view_up=view_up,
+            clim=(vmin, vmax),
+            cmap=cmap_name,
+            mesh=mesh if show_inclusion else None,
+            show_inclusion=show_inclusion,
+            inclusion_opacity=inclusion_opacity,
+            sensor_locations=sensor_locations,
+        )
+
+    plotter.close()
+
+    if image_3d is None:
+        logger.error("Failed to render 3D frame")
+        return False
+
+    # Get simulation time
+    time = ts_data.get("time", mid_idx * ts_data.get("dt", 1.0))
+
+    # Create combined figure (same as main video)
+    fig = plt.figure(figsize=figsize)
+    gs = fig.add_gridspec(1, 2, width_ratios=[1, 1], wspace=0.15)
+
+    # Left panel: 3D simulation
+    ax_3d = fig.add_subplot(gs[0])
+    ax_3d.imshow(image_3d)
+    ax_3d.axis("off")
+    ax_3d.set_title(f"3D Pressure Field (t = {time:.4f} s)", pad=5)
+
+    # Right panel: Sensor data
+    ax_sensor = fig.add_subplot(gs[1])
+
+    if sensor_matrix is not None:
+        # Show full sensor matrix up to mid_idx
+        sensor_idx = min(mid_idx, sensor_matrix.shape[1] - 1)
+        current_sensor_data = sensor_matrix[:, : sensor_idx + 1]
+
+        sensor_extent = (
+            0.0,
+            float(sensor_matrix.shape[1]),
+            0.0,
+            float(sensor_matrix.shape[0]),
+        )
+
+        im_sensor = ax_sensor.imshow(
+            current_sensor_data,
+            aspect="auto",
+            cmap=field_cmap,
+            origin="lower",
+            vmin=-sensor_vmax,
+            vmax=sensor_vmax,
+            extent=sensor_extent,
+        )
+
+        # Draw face separator lines
+        if sensors_per_face is not None and sensors_per_face > 0:
+            line_color = NORD_COLORS["nord3"]
+            num_faces = sensor_matrix.shape[0] // sensors_per_face
+            for face_idx in range(1, num_faces):
+                y_line = face_idx * sensors_per_face
+                ax_sensor.axhline(
+                    y=y_line, color=line_color, linewidth=0.5, linestyle="-"
+                )
+
+        cbar = plt.colorbar(
+            im_sensor,
+            ax=ax_sensor,
+            label="Pressure",
+            fraction=0.03,
+            pad=0.02,
+            shrink=0.8,
+        )
+        cbar.ax.tick_params(labelsize=7)
+        cbar.ax.yaxis.set_tick_params(color=NORD_COLORS["nord4"])
+        cbar.outline.set_edgecolor(NORD_COLORS["nord3"])
+        plt.setp(
+            plt.getp(cbar.ax.axes, "yticklabels"),
+            color=NORD_COLORS["nord4"],
+        )
+        cbar.set_label("Pressure", color=NORD_COLORS["nord4"])
+
+        ax_sensor.set_xlabel("Time Step")
+        ax_sensor.set_ylabel("Sensor Index")
+        ax_sensor.set_xlim(0, sensor_matrix.shape[1])
+    else:
+        ax_sensor.text(
+            0.5,
+            0.5,
+            "No sensor data",
+            ha="center",
+            va="center",
+            transform=ax_sensor.transAxes,
+        )
+
+    ax_sensor.set_title("Sensor Recordings")
+
+    plt.tight_layout()
+
+    # Save the complete frame
+    fig.savefig(output_file, dpi=dpi, facecolor=fig.get_facecolor(), edgecolor="none")
+    plt.close(fig)
+
+    logger.info(f"Dev frame saved to {output_file}")
+    return True
 
 
 def create_video_from_images(
@@ -799,6 +1419,18 @@ if __name__ == "__main__":
         help="Frames per second",
     )
     parser.add_argument(
+        "--vmin",
+        type=float,
+        default=-1.0,
+        help="Minimum value for pressure colormap",
+    )
+    parser.add_argument(
+        "--vmax",
+        type=float,
+        default=1.0,
+        help="Maximum value for pressure colormap",
+    )
+    parser.add_argument(
         "--orbits",
         type=float,
         default=1 / 3,
@@ -853,16 +1485,52 @@ if __name__ == "__main__":
     parser.add_argument(
         "--final-orbit",
         type=float,
-        default=2.0,
+        default=4.0,
         help="Seconds of orbiting at the last simulation frame",
+    )
+    parser.add_argument(
+        "--render-mode",
+        type=str,
+        choices=["points", "isosurface"],
+        default="points",
+        help="Rendering mode: 'points' for point cloud, 'isosurface' for isosurfaces",
+    )
+    parser.add_argument(
+        "--isosurface-opacity",
+        type=float,
+        default=0.7,
+        help="Opacity for isosurface meshes (0-1)",
+    )
+    parser.add_argument(
+        "--dev",
+        action="store_true",
+        help="Development mode: render single frame from middle for fast testing",
     )
 
     args = parser.parse_args()
     configure_logging()
 
+    # Development mode: render single frame from middle
+    if args.dev:
+        success = render_dev_frame(
+            sim_dir=args.sim_dir,
+            output_file=args.output,
+            vmin=args.vmin,
+            vmax=args.vmax,
+            render_mode=args.render_mode,
+            show_inclusion=not args.no_inclusion,
+            inclusion_opacity=args.inclusion_opacity,
+            isosurface_opacity=args.isosurface_opacity,
+        )
+        if not success:
+            exit(1)
+        exit(0)
+
     success = create_video_with_sensors_3d(
         sim_dir=args.sim_dir,
         output_file=args.output,
+        vmin=args.vmin,
+        vmax=args.vmax,
         fps=args.fps,
         num_orbits=args.orbits,
         point_size=args.point_size,
@@ -874,6 +1542,8 @@ if __name__ == "__main__":
         pan_arc_degrees=args.pan_arc,
         pan_elevation_end=args.pan_elevation_end,
         final_orbit_seconds=args.final_orbit,
+        render_mode=args.render_mode,
+        isosurface_opacity=args.isosurface_opacity,
     )
 
     if not success:

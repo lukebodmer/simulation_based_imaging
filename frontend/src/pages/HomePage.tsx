@@ -217,6 +217,28 @@ export function HomePage() {
           <p className={styles.subtitle}>
             An interactive exploration of simulation-based imaging techniques
           </p>
+          <div className={styles.heroCarousel}>
+            <VideoCarousel
+              hideText
+              videos={[
+                {
+                  src: "/videos/3d_video_1.mp4",
+                  title: "Multiple Sources (Isosurfaces)",
+                  description: "",
+                },
+                {
+                  src: "/videos/3d_video_2.mp4",
+                  title: "Multiple Sources (Points)",
+                  description: "",
+                },
+                {
+                  src: "/videos/3d_video_3.mp4",
+                  title: "Single Source (Points)",
+                  description: "",
+                },
+              ]}
+            />
+          </div>
           <button className={styles.getStartedButton} onClick={handleGetStarted}>
             Get Started
           </button>
@@ -343,7 +365,30 @@ export function HomePage() {
 
         <section id="3d-example" className={styles.section}>
           <h2 className={styles.sectionTitle}>3D Example</h2>
-          <div className={styles.sectionContent}></div>
+          <div className={styles.sectionContent}>
+            <VideoCarousel
+              videos={[
+                {
+                  src: "/videos/3d_video_1.mp4",
+                  title: "Multiple Sources (Isosurfaces)",
+                  description:
+                    "A 3D acoustic simulation with multiple sources. The pressure field is visualized using isosurfaces, showing wave propagation through the tetrahedral mesh domain with an embedded inclusion.",
+                },
+                {
+                  src: "/videos/3d_video_2.mp4",
+                  title: "Multiple Sources (Points)",
+                  description:
+                    "Multiple acoustic sources emit waves that interact with each other and the inclusion. The point cloud rendering shows pressure values at each node of the tetrahedral mesh.",
+                },
+                {
+                  src: "/videos/3d_video_3.mp4",
+                  title: "Single Source (Points)",
+                  description:
+                    "A single acoustic source emits waves that propagate through the domain and interact with the inclusion. The point cloud visualization reveals the wave structure at mesh nodes.",
+                },
+              ]}
+            />
+          </div>
         </section>
 
         <section id="results" className={styles.section}>

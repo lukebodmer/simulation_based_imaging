@@ -118,6 +118,8 @@ class VisualizeBatchPage:
         self.state.point_size = 8
         self.state.show_inclusion = True
         self.state.inclusion_opacity = 0.3
+        self.state.render_mode = "points"  # "points" or "isosurface"
+        self.state.isosurface_opacity = 0.7
 
         # Refresh batch list on init
         self._refresh_batch_list()
@@ -136,6 +138,8 @@ class VisualizeBatchPage:
         self.state.change("point_size")(self._on_visualization_setting_changed)
         self.state.change("show_inclusion")(self._on_visualization_setting_changed)
         self.state.change("inclusion_opacity")(self._on_visualization_setting_changed)
+        self.state.change("render_mode")(self._on_visualization_setting_changed)
+        self.state.change("isosurface_opacity")(self._on_visualization_setting_changed)
 
     def _refresh_batch_list(self):
         """Scan /data/simulations for available batches."""
@@ -428,57 +432,28 @@ class VisualizeBatchPage:
         self.plotter_sim.clear()
 
         try:
-            # Get node coordinates
-            if hasattr(self.mesh_data, "x"):
-                x = self._to_numpy(self.mesh_data.x.ravel(order="F"))
-                y = self._to_numpy(self.mesh_data.y.ravel(order="F"))
-                z = self._to_numpy(self.mesh_data.z.ravel(order="F"))
-            else:
-                x = self._to_numpy(self.mesh_data["x"].ravel(order="F"))
-                y = self._to_numpy(self.mesh_data["y"].ravel(order="F"))
-                z = self._to_numpy(self.mesh_data["z"].ravel(order="F"))
-
-            node_coordinates = np.column_stack((x, y, z))
-
             # Get pressure field
             fields = self.timestep_data.get("fields", {})
-            if "p" in fields:
-                pressure = self._to_numpy(fields["p"]).ravel(order="F")
+            if "p" not in fields:
+                return
 
-                # Get visualization settings from state
-                colormap = self.state.selected_colormap
-                point_size = int(self.state.point_size)
+            pressure = self._to_numpy(fields["p"]).ravel(order="F")
 
-                # Get opacity from preset
-                opacity_preset = self.state.selected_opacity_preset
-                opacity = [0.9, 0.7, 0.5, 0.3, 0, 0.3, 0.5, 0.7, 0.9]  # default
-                for preset in OPACITY_PRESETS:
-                    if preset["value"] == opacity_preset:
-                        opacity = preset["opacity"]
-                        break
+            # Get visualization settings from state
+            colormap = self.state.selected_colormap
 
-                # Determine color limits
-                if self.state.auto_clim:
-                    clim_max = float(np.abs(pressure).max()) or 1.0
-                    clim = [-clim_max, clim_max]
-                else:
-                    clim = [float(self.state.clim_min), float(self.state.clim_max)]
+            # Determine color limits
+            if self.state.auto_clim:
+                clim_max = float(np.abs(pressure).max()) or 1.0
+                clim = [-clim_max, clim_max]
+            else:
+                clim = [float(self.state.clim_min), float(self.state.clim_max)]
 
-                # Filter out points with near-zero pressure to avoid transparent dots
-                threshold = 0.01 * max(abs(clim[0]), abs(clim[1]))
-                mask = np.abs(pressure) > threshold
-
-                if np.any(mask):
-                    self.plotter_sim.add_points(
-                        node_coordinates[mask],
-                        scalars=pressure[mask],
-                        cmap=colormap,
-                        opacity=opacity,
-                        clim=clim,
-                        point_size=point_size,
-                        render_points_as_spheres=True,
-                        scalar_bar_args={"title": "Pressure"},
-                    )
+            # Choose render mode
+            if self.state.render_mode == "isosurface":
+                self._render_isosurface(pressure, colormap, clim)
+            else:
+                self._render_points(pressure, colormap, clim)
 
             # Add inclusion overlay if enabled
             if self.state.show_inclusion:
@@ -505,6 +480,125 @@ class VisualizeBatchPage:
         except Exception as e:
             logger.error(f"Failed to update simulation plot: {e}")
 
+    def _render_points(self, pressure: np.ndarray, colormap: str, clim: list):
+        """Render simulation data as point cloud."""
+        # Get node coordinates
+        if hasattr(self.mesh_data, "x"):
+            x = self._to_numpy(self.mesh_data.x.ravel(order="F"))
+            y = self._to_numpy(self.mesh_data.y.ravel(order="F"))
+            z = self._to_numpy(self.mesh_data.z.ravel(order="F"))
+        else:
+            x = self._to_numpy(self.mesh_data["x"].ravel(order="F"))
+            y = self._to_numpy(self.mesh_data["y"].ravel(order="F"))
+            z = self._to_numpy(self.mesh_data["z"].ravel(order="F"))
+
+        node_coordinates = np.column_stack((x, y, z))
+
+        point_size = int(self.state.point_size)
+
+        # Get opacity from preset
+        opacity_preset = self.state.selected_opacity_preset
+        opacity = [0.9, 0.7, 0.5, 0.3, 0, 0.3, 0.5, 0.7, 0.9]  # default
+        for preset in OPACITY_PRESETS:
+            if preset["value"] == opacity_preset:
+                opacity = preset["opacity"]
+                break
+
+        # Filter out points with near-zero pressure to avoid transparent dots
+        threshold = 0.01 * max(abs(clim[0]), abs(clim[1]))
+        mask = np.abs(pressure) > threshold
+
+        if np.any(mask):
+            self.plotter_sim.add_points(
+                node_coordinates[mask],
+                scalars=pressure[mask],
+                cmap=colormap,
+                opacity=opacity,
+                clim=clim,
+                point_size=point_size,
+                render_points_as_spheres=True,
+                scalar_bar_args={"title": "Pressure"},
+            )
+
+    def _render_isosurface(self, pressure: np.ndarray, colormap: str, clim: list):
+        """Render simulation data as isosurfaces."""
+        # Get mesh topology
+        if hasattr(self.mesh_data, "cell_to_vertices"):
+            cell_to_vertices = self._to_numpy(self.mesh_data.cell_to_vertices)
+            vertex_coordinates = self._to_numpy(self.mesh_data.vertex_coordinates)
+            x_dg = self._to_numpy(self.mesh_data.x)
+            y_dg = self._to_numpy(self.mesh_data.y)
+            z_dg = self._to_numpy(self.mesh_data.z)
+        else:
+            cell_to_vertices = self._to_numpy(self.mesh_data["cell_to_vertices"])
+            vertex_coordinates = self._to_numpy(self.mesh_data["vertex_coordinates"])
+            x_dg = self._to_numpy(self.mesh_data["x"])
+            y_dg = self._to_numpy(self.mesh_data["y"])
+            z_dg = self._to_numpy(self.mesh_data["z"])
+
+        num_cells = len(cell_to_vertices)
+        num_vertices = len(vertex_coordinates)
+        np_nodes = x_dg.shape[0]  # Number of DG nodes per cell
+
+        # Reshape pressure to match DG node layout (Np, num_cells)
+        pressure_2d = pressure.reshape((np_nodes, num_cells), order="F")
+
+        # Interpolate DG node values to mesh vertices
+        vertex_pressure = np.zeros(num_vertices)
+        vertex_counts = np.zeros(num_vertices)
+
+        for cell_idx in range(num_cells):
+            cell_verts = cell_to_vertices[cell_idx]
+            cell_x = x_dg[:, cell_idx]
+            cell_y = y_dg[:, cell_idx]
+            cell_z = z_dg[:, cell_idx]
+            cell_p = pressure_2d[:, cell_idx]
+
+            for vert_idx in cell_verts:
+                vx, vy, vz = vertex_coordinates[vert_idx]
+                distances = (cell_x - vx) ** 2 + (cell_y - vy) ** 2 + (cell_z - vz) ** 2
+                nearest_node = np.argmin(distances)
+                vertex_pressure[vert_idx] += cell_p[nearest_node]
+                vertex_counts[vert_idx] += 1
+
+        vertex_counts[vertex_counts == 0] = 1
+        vertex_pressure /= vertex_counts
+
+        # Build tetrahedral grid
+        cell_conn = np.hstack([np.full((num_cells, 1), 4), cell_to_vertices]).ravel()
+        cell_types = np.full(num_cells, pv.CellType.TETRA, dtype=np.uint8)
+
+        grid = pv.UnstructuredGrid(cell_conn, cell_types, vertex_coordinates)
+        grid.point_data["pressure"] = vertex_pressure
+
+        # Compute isosurface levels
+        max_val = max(abs(clim[0]), abs(clim[1]))
+        isosurface_levels = [
+            -0.5 * max_val,
+            -0.2 * max_val,
+            -0.08 * max_val,
+            0.08 * max_val,
+            0.2 * max_val,
+            0.5 * max_val,
+        ]
+
+        # Extract and render isosurfaces
+        try:
+            contours = grid.contour(isosurfaces=isosurface_levels, scalars="pressure")
+            if contours.n_points > 0:
+                self.plotter_sim.add_mesh(
+                    contours,
+                    scalars="pressure",
+                    cmap=colormap,
+                    clim=clim,
+                    opacity=float(self.state.isosurface_opacity),
+                    show_scalar_bar=True,
+                    scalar_bar_args={"title": "Pressure"},
+                    smooth_shading=True,
+                )
+        except Exception as e:
+            logger.warning(f"Could not extract isosurfaces: {e}")
+
     def _add_inclusion_overlay(self):
         """Add inclusion (wave speed) visualization as overlay on simulation plot."""
         if self.mesh_data is None:
@@ -513,12 +607,10 @@ class VisualizeBatchPage:
         try:
             # Get mesh data
             if hasattr(self.mesh_data, "num_cells"):
-                num_cells = self.mesh_data.num_cells
                 cell_to_vertices = self._to_numpy(self.mesh_data.cell_to_vertices)
                 vertex_coordinates = self._to_numpy(self.mesh_data.vertex_coordinates)
                 speed = self._to_numpy(self.mesh_data.speed[0, :])
             else:
-                num_cells = self.mesh_data["num_cells"]
                 cell_to_vertices = self._to_numpy(self.mesh_data["cell_to_vertices"])
                 vertex_coordinates = self._to_numpy(
                     self.mesh_data["vertex_coordinates"]
@@ -731,119 +823,247 @@ class VisualizeBatchPage:
 
     def _build_selection_panel(self):
         """Build the left selection panel."""
-        with v3.VCard(classes="fill-height"):
-            v3.VCardTitle("Selection")
-            with v3.VCardText():
-                # Batch selection
-                with v3.VRow(align="center", dense=True):
-                    with v3.VCol(cols=10):
-                        v3.VSelect(
-                            v_model=("selected_batch",),
-                            items=("available_batches",),
-                            label="Batch",
-                            density="compact",
-                            clearable=True,
-                        )
-                    with v3.VCol(cols=2):
-                        v3.VBtn(
-                            icon="mdi-refresh",
-                            variant="text",
-                            density="compact",
-                            click=self._refresh_batch_list,
-                        )
+        with v3.VContainer(fluid=True, classes="fill-height pa-0"):
+            # Selection card
+            with v3.VCard(classes="mb-2"):
+                v3.VCardTitle("Selection", classes="py-2")
+                with v3.VCardText(classes="py-1"):
+                    # Batch selection
+                    with v3.VRow(align="center", dense=True):
+                        with v3.VCol(cols=10):
+                            v3.VSelect(
+                                v_model=("selected_batch",),
+                                items=("available_batches",),
+                                label="Batch",
+                                density="compact",
+                                clearable=True,
+                            )
+                        with v3.VCol(cols=2):
+                            v3.VBtn(
+                                icon="mdi-refresh",
+                                variant="text",
+                                density="compact",
+                                click=self._refresh_batch_list,
+                            )
 
-                # Simulation selection with navigation buttons
-                with v3.VRow(align="center", dense=True):
-                    with v3.VCol(cols=2, classes="pa-0"):
-                        v3.VBtn(
-                            icon="mdi-chevron-left",
-                            variant="text",
-                            density="compact",
-                            click=self._go_to_previous_simulation,
-                            disabled=(
-                                "!selected_simulation || simulation_list.length === 0",
-                            ),
-                        )
-                    with v3.VCol(cols=8, classes="pa-0"):
-                        v3.VSelect(
-                            v_model=("selected_simulation",),
-                            items=("simulation_list",),
-                            label="Simulation",
-                            density="compact",
-                            clearable=True,
-                            disabled=("!selected_batch",),
-                            hide_details=True,
-                        )
-                    with v3.VCol(cols=2, classes="pa-0"):
-                        v3.VBtn(
-                            icon="mdi-chevron-right",
-                            variant="text",
-                            density="compact",
-                            click=self._go_to_next_simulation,
-                            disabled=(
-                                "!selected_simulation || simulation_list.length === 0",
-                            ),
-                        )
+                    # Simulation selection with navigation buttons
+                    with v3.VRow(align="center", dense=True):
+                        with v3.VCol(cols=2, classes="pa-0"):
+                            v3.VBtn(
+                                icon="mdi-chevron-left",
+                                variant="text",
+                                density="compact",
+                                click=self._go_to_previous_simulation,
+                                disabled=(
+                                    "!selected_simulation || simulation_list.length === 0",
+                                ),
+                            )
+                        with v3.VCol(cols=8, classes="pa-0"):
+                            v3.VSelect(
+                                v_model=("selected_simulation",),
+                                items=("simulation_list",),
+                                label="Simulation",
+                                density="compact",
+                                clearable=True,
+                                disabled=("!selected_batch",),
+                                hide_details=True,
+                            )
+                        with v3.VCol(cols=2, classes="pa-0"):
+                            v3.VBtn(
+                                icon="mdi-chevron-right",
+                                variant="text",
+                                density="compact",
+                                click=self._go_to_next_simulation,
+                                disabled=(
+                                    "!selected_simulation || simulation_list.length === 0",
+                                ),
+                            )
 
-                # Timestep selection with navigation buttons
-                with v3.VRow(align="center", dense=True):
-                    with v3.VCol(cols=2, classes="pa-0"):
-                        v3.VBtn(
-                            icon="mdi-chevron-left",
-                            variant="text",
-                            density="compact",
-                            click=self._go_to_previous_timestep,
-                            disabled=(
-                                "!selected_timestep || timestep_list.length === 0",
-                            ),
-                        )
-                    with v3.VCol(cols=8, classes="pa-0"):
-                        v3.VSelect(
-                            v_model=("selected_timestep",),
-                            items=("timestep_list",),
-                            label="Timestep",
-                            item_title="title",
-                            item_value="value",
-                            density="compact",
-                            clearable=True,
-                            disabled=("!selected_simulation",),
-                            hide_details=True,
-                        )
-                    with v3.VCol(cols=2, classes="pa-0"):
-                        v3.VBtn(
-                            icon="mdi-chevron-right",
-                            variant="text",
-                            density="compact",
-                            click=self._go_to_next_timestep,
-                            disabled=(
-                                "!selected_timestep || timestep_list.length === 0",
-                            ),
-                        )
+                    # Timestep selection with navigation buttons
+                    with v3.VRow(align="center", dense=True):
+                        with v3.VCol(cols=2, classes="pa-0"):
+                            v3.VBtn(
+                                icon="mdi-chevron-left",
+                                variant="text",
+                                density="compact",
+                                click=self._go_to_previous_timestep,
+                                disabled=(
+                                    "!selected_timestep || timestep_list.length === 0",
+                                ),
+                            )
+                        with v3.VCol(cols=8, classes="pa-0"):
+                            v3.VSelect(
+                                v_model=("selected_timestep",),
+                                items=("timestep_list",),
+                                label="Timestep",
+                                item_title="title",
+                                item_value="value",
+                                density="compact",
+                                clearable=True,
+                                disabled=("!selected_simulation",),
+                                hide_details=True,
+                            )
+                        with v3.VCol(cols=2, classes="pa-0"):
+                            v3.VBtn(
+                                icon="mdi-chevron-right",
+                                variant="text",
+                                density="compact",
+                                click=self._go_to_next_timestep,
+                                disabled=(
+                                    "!selected_timestep || timestep_list.length === 0",
+                                ),
+                            )
 
-                v3.VDivider(classes="my-3")
+            # Visualization controls card
+            with v3.VCard(classes="mb-2"):
+                v3.VCardTitle("Visualization", classes="py-2")
+                with v3.VCardText(classes="py-1"):
+                    # Render mode toggle
+                    with v3.VRow(dense=True, align="center"):
+                        with v3.VCol(cols=12):
+                            with v3.VBtnToggle(
+                                v_model=("render_mode",),
+                                density="compact",
+                                mandatory=True,
+                                classes="w-100",
+                            ):
+                                v3.VBtn(
+                                    value="points",
+                                    text="Points",
+                                    prepend_icon="mdi-dots-hexagon",
+                                    size="small",
+                                    classes="flex-grow-1",
+                                )
+                                v3.VBtn(
+                                    value="isosurface",
+                                    text="Isosurface",
+                                    prepend_icon="mdi-shape",
+                                    size="small",
+                                    classes="flex-grow-1",
+                                )
 
-                # Parameters display
-                v3.VCardSubtitle("Simulation Parameters")
-                with v3.VExpansionPanels(multiple=True, density="compact"):
-                    with v3.VExpansionPanel(
-                        v_for="([section, params]) in Object.entries(simulation_parameters_dict)",
-                        key=("section",),
-                    ):
-                        v3.VExpansionPanelTitle("{{ section }}")
-                        with v3.VExpansionPanelText():
-                            with v3.VList(density="compact"):
-                                with v3.VListItem(
-                                    v_for="([key, value]) in Object.entries(params)",
-                                    key=("key",),
-                                ):
-                                    v3.VListItemTitle(
-                                        "{{ key }}",
-                                        classes="text-caption font-weight-bold",
-                                    )
-                                    v3.VListItemSubtitle(
-                                        "{{ value }}",
-                                        style="white-space: pre-wrap; font-family: monospace; font-size: 11px;",
-                                    )
+                    # Colormap and opacity
+                    v3.VSelect(
+                        v_model=("selected_colormap",),
+                        items=("colormap_options",),
+                        label="Colormap",
+                        density="compact",
+                        hide_details=True,
+                        classes="mt-2",
+                    )
+                    v3.VSelect(
+                        v_model=("selected_opacity_preset",),
+                        items=("opacity_presets",),
+                        label="Opacity",
+                        density="compact",
+                        hide_details=True,
+                        classes="mt-2",
+                        v_show="render_mode === 'points'",
+                    )
+
+                    # Color limits
+                    with v3.VRow(dense=True, align="center", classes="mt-2"):
+                        with v3.VCol(cols=5):
+                            v3.VTextField(
+                                v_model=("clim_min",),
+                                label="Min",
+                                type="number",
+                                step="0.1",
+                                density="compact",
+                                hide_details=True,
+                                disabled=("auto_clim",),
+                            )
+                        with v3.VCol(cols=5):
+                            v3.VTextField(
+                                v_model=("clim_max",),
+                                label="Max",
+                                type="number",
+                                step="0.1",
+                                density="compact",
+                                hide_details=True,
+                                disabled=("auto_clim",),
+                            )
+                        with v3.VCol(cols=2):
+                            v3.VCheckbox(
+                                v_model=("auto_clim",),
+                                label="Auto",
+                                density="compact",
+                                hide_details=True,
+                            )
+
+                    # Point size (only for points mode)
+                    v3.VSlider(
+                        v_model=("point_size",),
+                        label="Point Size",
+                        min=1,
+                        max=20,
+                        step=1,
+                        density="compact",
+                        hide_details=True,
+                        thumb_label=True,
+                        classes="mt-2",
+                        v_show="render_mode === 'points'",
+                    )
+
+                    # Isosurface opacity (only for isosurface mode)
+                    v3.VSlider(
+                        v_model=("isosurface_opacity",),
+                        label="Isosurface Opacity",
+                        min=0.1,
+                        max=1.0,
+                        step=0.1,
+                        density="compact",
+                        hide_details=True,
+                        thumb_label=True,
+                        classes="mt-2",
+                        v_show="render_mode === 'isosurface'",
+                    )
+
+                    v3.VDivider(classes="my-2")
+
+                    # Inclusion controls
+                    v3.VCheckbox(
+                        v_model=("show_inclusion",),
+                        label="Show Inclusion",
+                        density="compact",
+                        hide_details=True,
+                    )
+                    v3.VSlider(
+                        v_model=("inclusion_opacity",),
+                        label="Inclusion Opacity",
+                        min=0.0,
+                        max=1.0,
+                        step=0.1,
+                        density="compact",
+                        hide_details=True,
+                        thumb_label=True,
+                        disabled=("!show_inclusion",),
+                    )
+
+            # Parameters card
+            with v3.VCard(classes="flex-grow-1", style="overflow-y: auto;"):
+                v3.VCardTitle("Parameters", classes="py-2")
+                with v3.VCardText(classes="py-1"):
+                    with v3.VExpansionPanels(multiple=True, density="compact"):
+                        with v3.VExpansionPanel(
+                            v_for="([section, params]) in Object.entries(simulation_parameters_dict)",
+                            key=("section",),
+                        ):
+                            v3.VExpansionPanelTitle("{{ section }}")
+                            with v3.VExpansionPanelText():
+                                with v3.VList(density="compact"):
+                                    with v3.VListItem(
+                                        v_for="([key, value]) in Object.entries(params)",
+                                        key=("key",),
+                                    ):
+                                        v3.VListItemTitle(
+                                            "{{ key }}",
+                                            classes="text-caption font-weight-bold",
+                                        )
+                                        v3.VListItemSubtitle(
+                                            "{{ value }}",
+                                            style="white-space: pre-wrap; font-family: monospace; font-size: 11px;",
+                                        )
 
     def _build_visualization_panel(self):
         """Build the right visualization panel."""
@@ -870,97 +1090,12 @@ class VisualizeBatchPage:
 
                     # Simulation tab
                     with v3.VWindowItem(value="simulation", style="height: 100%;"):
-                        # Visualization controls toolbar
-                        with v3.VToolbar(density="compact", color="surface"):
-                            with v3.VRow(dense=True, align="center", classes="px-2"):
-                                with v3.VCol(cols="auto"):
-                                    v3.VSelect(
-                                        v_model=("selected_colormap",),
-                                        items=("colormap_options",),
-                                        label="Colormap",
-                                        density="compact",
-                                        hide_details=True,
-                                        style="min-width: 180px;",
-                                    )
-                                with v3.VCol(cols="auto"):
-                                    v3.VSelect(
-                                        v_model=("selected_opacity_preset",),
-                                        items=("opacity_presets",),
-                                        label="Opacity",
-                                        density="compact",
-                                        hide_details=True,
-                                        style="min-width: 160px;",
-                                    )
-                                with v3.VCol(cols="auto"):
-                                    v3.VTextField(
-                                        v_model=("clim_min",),
-                                        label="Min",
-                                        type="number",
-                                        step="0.1",
-                                        density="compact",
-                                        hide_details=True,
-                                        disabled=("auto_clim",),
-                                        style="max-width: 80px;",
-                                    )
-                                with v3.VCol(cols="auto"):
-                                    v3.VTextField(
-                                        v_model=("clim_max",),
-                                        label="Max",
-                                        type="number",
-                                        step="0.1",
-                                        density="compact",
-                                        hide_details=True,
-                                        disabled=("auto_clim",),
-                                        style="max-width: 80px;",
-                                    )
-                                with v3.VCol(cols="auto"):
-                                    v3.VCheckbox(
-                                        v_model=("auto_clim",),
-                                        label="Auto",
-                                        density="compact",
-                                        hide_details=True,
-                                    )
-                                with v3.VCol(cols="auto"):
-                                    v3.VSlider(
-                                        v_model=("point_size",),
-                                        label="Pt Size",
-                                        min=1,
-                                        max=20,
-                                        step=1,
-                                        density="compact",
-                                        hide_details=True,
-                                        thumb_label=True,
-                                        style="min-width: 120px;",
-                                    )
-                                v3.VDivider(vertical=True, classes="mx-2")
-                                with v3.VCol(cols="auto"):
-                                    v3.VCheckbox(
-                                        v_model=("show_inclusion",),
-                                        label="Show Inclusion",
-                                        density="compact",
-                                        hide_details=True,
-                                    )
-                                with v3.VCol(cols="auto"):
-                                    v3.VSlider(
-                                        v_model=("inclusion_opacity",),
-                                        label="Inclusion α",
-                                        min=0.0,
-                                        max=1.0,
-                                        step=0.1,
-                                        density="compact",
-                                        hide_details=True,
-                                        thumb_label=True,
-                                        disabled=("!show_inclusion",),
-                                        style="min-width: 120px;",
-                                    )
-                        # PyVista view - use calc to subtract toolbar height
-                        with v3.VSheet(style="height: calc(100% - 64px); width: 100%;"):
-                            view_sim = plotter_ui(
-                                self.plotter_sim,
-                                server=self.server,
-                                add_menu=False,
-                            )
-                            self.ctrl.view_update_sim = view_sim.update
+                        view_sim = plotter_ui(
+                            self.plotter_sim,
+                            server=self.server,
+                            add_menu=False,
+                        )
+                        self.ctrl.view_update_sim = view_sim.update
 
                     # Data tab
                     with v3.VWindowItem(value="data", style="height: 100%;"):
