@@ -14,7 +14,8 @@ urlpatterns = [
 
 if settings.DEBUG:
     urlpatterns += static(settings.STATIC_URL, document_root=settings.FRONTEND_DIR / "assets")
-    # Serve videos and images from frontend public directory
+    # Serve videos, images, and voxels from frontend public directory
     public_dir = settings.FRONTEND_DIR.parent / "public"
     urlpatterns += static("/videos/", document_root=public_dir / "videos")
     urlpatterns += static("/images/", document_root=public_dir / "images")
+    urlpatterns += static("/voxels/", document_root=public_dir / "voxels")

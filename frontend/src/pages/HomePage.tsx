@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import styles from "../styles/HomePage.module.css";
 import { VideoCarousel } from "../components/VideoCarousel";
 import { ImageCarousel } from "../components/ImageCarousel";
+import { VoxelComparisonCarousel } from "../components/VoxelComparisonCarousel";
 
 const sections = [
   { id: "hero", title: "Introduction" },
@@ -427,6 +428,11 @@ export function HomePage() {
                 },
               ]}
             />
+          </div>
+
+          <div className={styles.subslide}>
+            <h3 className={styles.subslideTitle}>Neural Network Results</h3>
+            <VoxelComparisonCarousel />
           </div>
         </section>
 

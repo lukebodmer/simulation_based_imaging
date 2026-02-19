@@ -1,0 +1,129 @@
+.carousel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  max-width: var(--max-content-width);
+  gap: var(--spacing-lg);
+}
+
+.viewerContainer {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  position: relative;
+}
+
+.viewers {
+  display: flex;
+  flex: 1;
+  gap: var(--spacing-md);
+  height: 400px;
+}
+
+.viewer {
+  flex: 1;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  background-color: var(--nord0);
+}
+
+.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.navButton {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 10;
+  background-color: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-full);
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  transition: all var(--transition-fast);
+}
+
+.navButton:hover {
+  background-color: var(--color-bg-tertiary);
+  color: var(--color-text-primary);
+  border-color: var(--color-primary);
+}
+
+.navButtonLeft {
+  left: -20px;
+}
+
+.navButtonRight {
+  right: -20px;
+}
+
+.info {
+  text-align: center;
+  padding: 0 var(--spacing-xl);
+}
+
+.description {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-relaxed);
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+.indicators {
+  display: flex;
+  gap: var(--spacing-sm);
+  justify-content: center;
+}
+
+.indicator {
+  width: 10px;
+  height: 10px;
+  border-radius: var(--radius-full);
+  background-color: var(--color-border);
+  border: none;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  padding: 0;
+}
+
+.indicator:hover {
+  background-color: var(--color-text-muted);
+}
+
+.indicatorActive {
+  background-color: var(--color-primary);
+  transform: scale(1.2);
+}
+
+@media (max-width: 768px) {
+  .viewers {
+    flex-direction: column;
+    height: 600px;
+  }
+
+  .viewer {
+    height: 280px;
+  }
+
+  .navButtonLeft {
+    left: 10px;
+  }
+
+  .navButtonRight {
+    right: 10px;
+  }
+}
