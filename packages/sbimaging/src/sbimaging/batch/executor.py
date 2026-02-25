@@ -140,12 +140,12 @@ class BatchExecutor:
 
         config = SimulationConfig.from_toml(param_file)
 
-        config.solver.total_time = None
-        if config.solver.num_steps is None:
-            if hasattr(config.solver, "_total_time") and config.solver._total_time:
-                config.solver.num_steps = int(config.solver._total_time / global_dt)
-            else:
-                raise ValueError(f"Cannot determine num_steps for {sim_hash}")
+        # Convert total_time to num_steps using global_dt
+        if config.solver.num_steps is None and config.solver.total_time is not None:
+            config.solver.num_steps = int(config.solver.total_time / global_dt)
+            config.solver.total_time = None
+        elif config.solver.num_steps is None:
+            raise ValueError(f"Cannot determine num_steps for {sim_hash}")
 
         mesh_file = None
         if mesh_resolver:

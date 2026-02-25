@@ -164,7 +164,9 @@ class RunBatchPage:
 
         # Solver settings
         self.state.polynomial_order = 1
+        self.state.solver_time_mode = "timesteps"  # "timesteps" or "total_time"
         self.state.number_of_timesteps = 10000
+        self.state.total_simulation_time = 1.0  # seconds
 
         # Receivers
         self.state.sensors_per_face = 25
@@ -174,6 +176,7 @@ class RunBatchPage:
         self.state.output_data_interval = 1000
         self.state.output_points_interval = 10
         self.state.output_energy_interval = 500
+        self.state.save_last_timestep_only = False  # Only save image/data on final step
 
         # UI state for expansion panels
         self.state.expanded_panels = [0, 1, 2, 3]
@@ -375,7 +378,14 @@ class RunBatchPage:
 
         if preset.solver:
             self.state.polynomial_order = preset.solver.polynomial_order
-            self.state.number_of_timesteps = preset.solver.number_of_timesteps
+            if preset.solver.total_time is not None:
+                self.state.solver_time_mode = "total_time"
+                self.state.total_simulation_time = preset.solver.total_time
+            else:
+                self.state.solver_time_mode = "timesteps"
+                self.state.number_of_timesteps = (
+                    preset.solver.number_of_timesteps or 10000
+                )
 
         if preset.receivers:
             self.state.sensors_per_face = preset.receivers.sensors_per_face
@@ -385,6 +395,9 @@ class RunBatchPage:
             self.state.output_data_interval = preset.output.data
             self.state.output_points_interval = preset.output.points
             self.state.output_energy_interval = preset.output.energy
+            self.state.save_last_timestep_only = getattr(
+                preset.output, "save_last_timestep_only", False
+            )
 
         self._update_existing_count()
 
@@ -452,12 +465,12 @@ class RunBatchPage:
                     self._build_batch_settings_content()
 
             with v3.VExpansionPanel():
-                v3.VExpansionPanelTitle("Material Properties (Swept)")
+                v3.VExpansionPanelTitle("Material Properties")
                 with v3.VExpansionPanelText():
                     self._build_material_content()
 
             with v3.VExpansionPanel():
-                v3.VExpansionPanelTitle("Inclusion Geometry (Swept)")
+                v3.VExpansionPanelTitle("Inclusion Geometry")
                 with v3.VExpansionPanelText():
                     self._build_geometry_content()
 
@@ -472,32 +485,32 @@ class RunBatchPage:
             multiple=True, v_model=("expanded_fixed_panels",), classes="mb-4"
         ):
             with v3.VExpansionPanel():
-                v3.VExpansionPanelTitle("Sources (Fixed)")
+                v3.VExpansionPanelTitle("Sources")
                 with v3.VExpansionPanelText():
                     self._build_sources_content()
 
             with v3.VExpansionPanel():
-                v3.VExpansionPanelTitle("Outer Material (Fixed)")
+                v3.VExpansionPanelTitle("Outer Material")
                 with v3.VExpansionPanelText():
                     self._build_outer_material_content()
 
             with v3.VExpansionPanel():
-                v3.VExpansionPanelTitle("Mesh Settings (Fixed)")
+                v3.VExpansionPanelTitle("Mesh Settings")
                 with v3.VExpansionPanelText():
                     self._build_mesh_content()
 
             with v3.VExpansionPanel():
-                v3.VExpansionPanelTitle("Solver (Fixed)")
+                v3.VExpansionPanelTitle("Solver")
                 with v3.VExpansionPanelText():
                     self._build_solver_content()
 
             with v3.VExpansionPanel():
-                v3.VExpansionPanelTitle("Receivers (Fixed)")
+                v3.VExpansionPanelTitle("Receivers")
                 with v3.VExpansionPanelText():
                     self._build_receivers_content()
 
             with v3.VExpansionPanel():
-                v3.VExpansionPanelTitle("Output Intervals (Fixed)")
+                v3.VExpansionPanelTitle("Output Intervals")
                 with v3.VExpansionPanelText():
                     self._build_output_intervals_content()
 
@@ -960,15 +973,38 @@ class RunBatchPage:
             persistent_hint=True,
         )
 
+        # Time mode selection
+        with v3.VRadioGroup(
+            v_model=("solver_time_mode",),
+            inline=True,
+            density="compact",
+            classes="mt-2",
+        ):
+            v3.VRadio(label="Timesteps", value="timesteps")
+            v3.VRadio(label="Final Time", value="total_time")
+
+        # Timesteps input (shown when mode is "timesteps")
         v3.VTextField(
             v_model=("number_of_timesteps",),
+            v_show="solver_time_mode === 'timesteps'",
             label="Number of Timesteps",
             type="number",
             step="1000",
             density="compact",
             hint="Total simulation timesteps",
             persistent_hint=True,
-            classes="mt-2",
+        )
+
+        # Total time input (shown when mode is "total_time")
+        v3.VTextField(
+            v_model=("total_simulation_time",),
+            v_show="solver_time_mode === 'total_time'",
+            label="Final Simulation Time (seconds)",
+            type="number",
+            step="0.1",
+            density="compact",
+            hint="Timesteps computed after mesh generation",
+            persistent_hint=True,
         )
 
     def _build_receivers_content(self):
@@ -995,6 +1031,15 @@ class RunBatchPage:
             classes="text-caption mb-3",
         )
 
+        # Checkbox to save only last timestep for image/data
+        v3.VCheckbox(
+            v_model=("save_last_timestep_only",),
+            label="Only save last timestep (image/data)",
+            density="compact",
+            hint="Saves image and data only on the final timestep",
+            persistent_hint=True,
+        )
+
         with v3.VRow(dense=True):
             with v3.VCol(cols=6):
                 v3.VTextField(
@@ -1003,6 +1048,7 @@ class RunBatchPage:
                     type="number",
                     step="100",
                     density="compact",
+                    disabled=("save_last_timestep_only",),
                 )
             with v3.VCol(cols=6):
                 v3.VTextField(
@@ -1011,6 +1057,7 @@ class RunBatchPage:
                     type="number",
                     step="100",
                     density="compact",
+                    disabled=("save_last_timestep_only",),
                 )
 
         with v3.VRow(dense=True):
@@ -1290,7 +1337,16 @@ class RunBatchPage:
             ),
             solver=SolverConfig(
                 polynomial_order=int(self.state.polynomial_order),
-                number_of_timesteps=int(self.state.number_of_timesteps),
+                number_of_timesteps=(
+                    int(self.state.number_of_timesteps)
+                    if self.state.solver_time_mode == "timesteps"
+                    else None
+                ),
+                total_time=(
+                    float(self.state.total_simulation_time)
+                    if self.state.solver_time_mode == "total_time"
+                    else None
+                ),
             ),
             receivers=ReceiverConfig(
                 sensors_per_face=int(self.state.sensors_per_face),
@@ -1300,6 +1356,7 @@ class RunBatchPage:
                 data=int(self.state.output_data_interval),
                 points=int(self.state.output_points_interval),
                 energy=int(self.state.output_energy_interval),
+                save_last_timestep_only=bool(self.state.save_last_timestep_only),
             ),
             batch_name=self.state.batch_name,
             batch_description=self.state.batch_description,
@@ -1317,6 +1374,13 @@ class RunBatchPage:
     def _close_save_preset_dialog(self):
         """Close the save preset dialog."""
         self.state.show_save_preset_dialog = False
+
+    def _get_solver_time_toml(self) -> str:
+        """Get the solver time configuration as TOML string."""
+        if self.state.solver_time_mode == "total_time":
+            return f"total_time = {float(self.state.total_simulation_time)}"
+        else:
+            return f"number_of_timesteps = {int(self.state.number_of_timesteps)}"
 
     def _save_preset(self):
         """Save current parameters as a preset."""
@@ -1385,7 +1449,7 @@ box_size = {float(self.state.box_size)}
 
 [fixed.solver]
 polynomial_order = {int(self.state.polynomial_order)}
-number_of_timesteps = {int(self.state.number_of_timesteps)}
+{self._get_solver_time_toml()}
 
 [fixed.receivers]
 sensors_per_face = {int(self.state.sensors_per_face)}
@@ -1395,6 +1459,7 @@ image = {int(self.state.output_image_interval)}
 data = {int(self.state.output_data_interval)}
 points = {int(self.state.output_points_interval)}
 energy = {int(self.state.output_energy_interval)}
+save_last_timestep_only = {str(bool(self.state.save_last_timestep_only)).lower()}
 '''
 
         # Get the presets directory path
@@ -1503,6 +1568,7 @@ energy = {int(self.state.output_energy_interval)}
                     "data": int(self.state.output_data_interval),
                     "points": int(self.state.output_points_interval),
                     "energy": int(self.state.output_energy_interval),
+                    "save_last_timestep_only": bool(self.state.save_last_timestep_only),
                 },
             },
         }

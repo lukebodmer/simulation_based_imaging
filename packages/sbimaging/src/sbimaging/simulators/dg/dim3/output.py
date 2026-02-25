@@ -25,6 +25,7 @@ class SimulationOutput:
         sensor_interval: Steps between sensor readings.
         data_interval: Steps between full data saves.
         energy_interval: Steps between energy calculations.
+        save_last_timestep_only: If True, only save data on final step.
     """
 
     def __init__(
@@ -34,6 +35,7 @@ class SimulationOutput:
         sensor_interval: int = 10,
         data_interval: int = 0,
         energy_interval: int = 0,
+        save_last_timestep_only: bool = False,
     ):
         """Initialize output handler.
 
@@ -43,11 +45,14 @@ class SimulationOutput:
             sensor_interval: Steps between sensor readings (0 to disable).
             data_interval: Steps between full data saves (0 to disable).
             energy_interval: Steps between energy calculations (0 to disable).
+            save_last_timestep_only: If True, only save data on final step.
         """
         self.output_dir = Path(output_dir)
         self.sensor_interval = sensor_interval
         self.data_interval = data_interval
         self.energy_interval = energy_interval
+        self.save_last_timestep_only = save_last_timestep_only
+        self._num_steps = num_steps
 
         self._logger = get_logger(__name__)
         self._start_time = 0.0
@@ -88,9 +93,7 @@ class SimulationOutput:
             sensor_locations: Optional (num_sensors, 3) array of sensor coordinates.
         """
         for name in sensor_names:
-            self._sensor_data[name] = np.zeros(
-                (num_sensors, self._num_sensor_readings)
-            )
+            self._sensor_data[name] = np.zeros((num_sensors, self._num_sensor_readings))
         if sensor_locations is not None:
             self._sensor_data["locations"] = sensor_locations
 
@@ -104,6 +107,9 @@ class SimulationOutput:
 
     def should_save_data(self, step: int) -> bool:
         """Check if full data should be saved at this step."""
+        if self.save_last_timestep_only:
+            # Only save on the final timestep
+            return step == self._num_steps - 1
         return self.data_interval > 0 and step % self.data_interval == 0
 
     def should_save_energy(self, step: int) -> bool:
@@ -228,7 +234,7 @@ class EnergyCalculator:
         self._j = xp.asarray(jacobians[0, :] if jacobians.ndim > 1 else jacobians)
         self._rho = xp.asarray(density[0, :] if density.ndim > 1 else density)
         self._c = xp.asarray(speed[0, :] if speed.ndim > 1 else speed)
-        self._inv_bulk = 1.0 / (self._rho * self._c ** 2)
+        self._inv_bulk = 1.0 / (self._rho * self._c**2)
 
     def compute(
         self,

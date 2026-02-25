@@ -8,6 +8,7 @@ import numpy as np
 import pyvista as pv
 import toml
 from pyvista.trame.ui import plotter_ui
+from trame.widgets import html
 from trame.widgets import matplotlib as mpl_widgets
 from trame.widgets import vuetify3 as v3
 
@@ -80,9 +81,8 @@ class VisualizeBatchPage:
         self.state = server.state
         self.ctrl = server.controller
 
-        # PyVista plotters
+        # PyVista plotter
         self.plotter_sim = pv.Plotter()  # Simulation pressure data
-        self.plotter_wave = pv.Plotter()  # Wave speed visualization
 
         # Matplotlib figure widgets (will be set during UI build)
         self.sensor_matrix_widget = None
@@ -105,7 +105,7 @@ class VisualizeBatchPage:
         self.state.timestep_list = []
         self.state.selected_timestep = ""
         self.state.simulation_parameters_dict = {}
-        self.state.viz_active_tab = "wave"
+        self.state.viz_active_tab = "simulation"
 
         # Colormap and visualization controls
         self.state.colormap_options = COLORMAP_OPTIONS
@@ -120,6 +120,10 @@ class VisualizeBatchPage:
         self.state.inclusion_opacity = 0.3
         self.state.render_mode = "points"  # "points" or "isosurface"
         self.state.isosurface_opacity = 0.7
+
+        # Parameters tab state
+        self.state.params_batch_config = ""
+        self.state.params_batch_metadata = ""
 
         # Refresh batch list on init
         self._refresh_batch_list()
@@ -156,17 +160,46 @@ class VisualizeBatchPage:
         logger.info(f"Found {len(batches)} simulation batches")
 
     def _on_batch_selected(self, selected_batch, **kwargs):
-        """Handle batch selection - refresh simulation list."""
+        """Handle batch selection - refresh simulation list and load batch params."""
         self.state.simulation_list = []
         self.state.selected_simulation = ""
         self.state.timestep_list = []
         self.state.selected_timestep = ""
         self.state.simulation_parameters_dict = {}
+        self.state.params_batch_config = ""
+        self.state.params_batch_metadata = ""
 
         if not selected_batch:
             return
 
-        sim_dir = DEFAULT_DATA_DIR / selected_batch / "simulations"
+        batch_dir = DEFAULT_DATA_DIR / selected_batch
+
+        # Load batch configuration (sweep and fixed parameters)
+        config_file = batch_dir / "batch_config.toml"
+        if config_file.exists():
+            try:
+                self.state.params_batch_config = config_file.read_text()
+                logger.info(f"Loaded batch config from {config_file}")
+            except Exception as e:
+                logger.error(f"Failed to load batch config: {e}")
+                self.state.params_batch_config = f"Error loading config: {e}"
+        else:
+            self.state.params_batch_config = "No batch_config.toml found"
+
+        # Load batch metadata (mesh info, global_dt)
+        metadata_file = batch_dir / "batch_metadata.toml"
+        if metadata_file.exists():
+            try:
+                self.state.params_batch_metadata = metadata_file.read_text()
+                logger.info(f"Loaded batch metadata from {metadata_file}")
+            except Exception as e:
+                logger.error(f"Failed to load batch metadata: {e}")
+                self.state.params_batch_metadata = f"Error loading metadata: {e}"
+        else:
+            self.state.params_batch_metadata = "No batch_metadata.toml found"
+
+        # Load simulation list
+        sim_dir = batch_dir / "simulations"
         if sim_dir.exists():
             sims = [
                 {"title": d.name, "value": d.name}
@@ -356,73 +389,12 @@ class VisualizeBatchPage:
         if self.timestep_data is None:
             return
 
-        # Update PyVista plotters
-        self._update_wave_speed_plot()
+        # Update PyVista plotter
         self._update_simulation_plot()
 
         # Update matplotlib plots
         self._update_sensor_plot()
         self._update_energy_plot()
-
-    def _update_wave_speed_plot(self):
-        """Update the wave speed visualization."""
-        if self.mesh_data is None:
-            return
-
-        self.plotter_wave.clear()
-
-        try:
-            # Build tetrahedral grid from mesh
-            if hasattr(self.mesh_data, "num_cells"):
-                num_cells = self.mesh_data.num_cells
-                cell_to_vertices = self._to_numpy(self.mesh_data.cell_to_vertices)
-                vertex_coordinates = self._to_numpy(self.mesh_data.vertex_coordinates)
-                speed = self._to_numpy(self.mesh_data.speed[0, :])
-            else:
-                num_cells = self.mesh_data["num_cells"]
-                cell_to_vertices = self._to_numpy(self.mesh_data["cell_to_vertices"])
-                vertex_coordinates = self._to_numpy(
-                    self.mesh_data["vertex_coordinates"]
-                )
-                speed = self._to_numpy(self.mesh_data["speed_per_cell"])
-
-            cell_conn = np.hstack(
-                [np.full((num_cells, 1), 4), cell_to_vertices]
-            ).ravel()
-            cell_types = np.full(num_cells, pv.CellType.TETRA, dtype=np.uint8)
-
-            grid = pv.UnstructuredGrid(cell_conn, cell_types, vertex_coordinates)
-            grid.cell_data["speed"] = speed
-
-            # Create uniform grid for volume rendering
-            bounds = grid.bounds
-            resolution = (50, 50, 50)
-            nx, ny, nz = resolution
-            image = pv.ImageData()
-            image.dimensions = resolution
-            image.origin = (bounds[0], bounds[2], bounds[4])
-            image.spacing = (
-                (bounds[1] - bounds[0]) / (nx - 1),
-                (bounds[3] - bounds[2]) / (ny - 1),
-                (bounds[5] - bounds[4]) / (nz - 1),
-            )
-
-            sampled = image.sample(grid)
-            self.plotter_wave.add_volume(
-                sampled,
-                scalars="speed",
-                cmap="viridis",
-                opacity="sigmoid",
-            )
-            self.plotter_wave.show_grid()
-            self.plotter_wave.reset_camera()
-            self.plotter_wave.render()
-
-            # Push update to trame UI
-            self.ctrl.view_update_wave()
-
-        except Exception as e:
-            logger.error(f"Failed to update wave speed plot: {e}")
 
     def _update_simulation_plot(self):
         """Update the simulation pressure visualization."""
@@ -812,20 +784,24 @@ class VisualizeBatchPage:
     def build_ui(self):
         """Build the visualization page UI."""
         with v3.VContainer(fluid=True, classes="fill-height"):
-            with v3.VRow(classes="fill-height"):
-                # Left sidebar - Selection controls
-                with v3.VCol(cols=3, classes="fill-height"):
+            with v3.VRow(classes="fill-height", no_gutters=True):
+                # Left sidebar - Selection controls (fixed width)
+                with v3.VCol(
+                    cols="auto",
+                    classes="fill-height",
+                    style="width: 320px; min-width: 320px; max-width: 320px;",
+                ):
                     self._build_selection_panel()
 
                 # Right content - Visualizations
-                with v3.VCol(cols=9, classes="fill-height"):
+                with v3.VCol(classes="fill-height"):
                     self._build_visualization_panel()
 
     def _build_selection_panel(self):
         """Build the left selection panel."""
         with v3.VContainer(fluid=True, classes="fill-height pa-0"):
             # Selection card
-            with v3.VCard(classes="mb-2"):
+            with v3.VCard(classes="mb-2", style="width: 100%;"):
                 v3.VCardTitle("Selection", classes="py-2")
                 with v3.VCardText(classes="py-1"):
                     # Batch selection
@@ -915,7 +891,7 @@ class VisualizeBatchPage:
                             )
 
             # Visualization controls card
-            with v3.VCard(classes="mb-2"):
+            with v3.VCard(classes="mb-2", style="width: 100%;"):
                 v3.VCardTitle("Visualization", classes="py-2")
                 with v3.VCardText(classes="py-1"):
                     # Render mode toggle
@@ -963,7 +939,7 @@ class VisualizeBatchPage:
 
                     # Color limits
                     with v3.VRow(dense=True, align="center", classes="mt-2"):
-                        with v3.VCol(cols=5):
+                        with v3.VCol(cols=4):
                             v3.VTextField(
                                 v_model=("clim_min",),
                                 label="Min",
@@ -973,7 +949,7 @@ class VisualizeBatchPage:
                                 hide_details=True,
                                 disabled=("auto_clim",),
                             )
-                        with v3.VCol(cols=5):
+                        with v3.VCol(cols=4):
                             v3.VTextField(
                                 v_model=("clim_max",),
                                 label="Max",
@@ -983,7 +959,7 @@ class VisualizeBatchPage:
                                 hide_details=True,
                                 disabled=("auto_clim",),
                             )
-                        with v3.VCol(cols=2):
+                        with v3.VCol(cols=4):
                             v3.VCheckbox(
                                 v_model=("auto_clim",),
                                 label="Auto",
@@ -1041,7 +1017,7 @@ class VisualizeBatchPage:
                     )
 
             # Parameters card
-            with v3.VCard(classes="flex-grow-1", style="overflow-y: auto;"):
+            with v3.VCard(classes="flex-grow-1", style="width: 100%; overflow-y: auto;"):
                 v3.VCardTitle("Parameters", classes="py-2")
                 with v3.VCardText(classes="py-1"):
                     with v3.VExpansionPanels(multiple=True, density="compact"):
@@ -1067,27 +1043,23 @@ class VisualizeBatchPage:
 
     def _build_visualization_panel(self):
         """Build the right visualization panel."""
-        with v3.VCard(classes="fill-height"):
-            # Tabs for different views
-            with v3.VTabs(v_model=("viz_active_tab",), density="compact"):
-                v3.VTab(value="wave", text="Wave Speed")
+        with v3.VCard(classes="fill-height", flat=True):
+            # Tabs for different views (offset left to account for left sidebar)
+            with v3.VTabs(
+                v_model=("viz_active_tab",),
+                density="compact",
+                align_tabs="center",
+                style="margin-left: -260px; margin-top: -12px;",
+            ):
                 v3.VTab(value="simulation", text="Simulation")
                 v3.VTab(value="data", text="Data")
+                v3.VTab(value="parameters", text="Parameters")
 
             with v3.VCardText(classes="fill-height pa-0"):
                 with v3.VWindow(
                     v_model=("viz_active_tab",),
                     style="height: calc(100vh - 180px);",
                 ):
-                    # Wave Speed tab
-                    with v3.VWindowItem(value="wave", style="height: 100%;"):
-                        view_wave = plotter_ui(
-                            self.plotter_wave,
-                            server=self.server,
-                            add_menu=False,
-                        )
-                        self.ctrl.view_update_wave = view_wave.update
-
                     # Simulation tab
                     with v3.VWindowItem(value="simulation", style="height: 100%;"):
                         view_sim = plotter_ui(
@@ -1120,3 +1092,76 @@ class VisualizeBatchPage:
                                     self.energy_widget.update(
                                         plt.figure(figsize=(10, 4))
                                     )
+
+                    # Parameters tab
+                    with v3.VWindowItem(value="parameters", style="height: 100%;"):
+                        with v3.VContainer(
+                            fluid=True, classes="fill-height", style="overflow-y: auto;"
+                        ):
+                            with v3.VRow(classes="fill-height"):
+                                # Left column - Batch config
+                                with v3.VCol(cols=12, md=6):
+                                    html.Div(
+                                        "Sweep & Fixed Parameters",
+                                        classes="text-subtitle-1 mb-2",
+                                    )
+                                    with v3.VSheet(
+                                        color="grey-darken-4",
+                                        rounded=True,
+                                        classes="pa-3 mb-3",
+                                        style="height: calc(50vh - 120px); overflow-y: auto;",
+                                    ):
+                                        html.Pre(
+                                            "{{ params_batch_config }}",
+                                            style="margin: 0; white-space: pre-wrap; font-family: monospace; font-size: 13px;",
+                                        )
+
+                                    html.Div(
+                                        "Computed Metadata",
+                                        classes="text-subtitle-1 mb-2",
+                                    )
+                                    with v3.VSheet(
+                                        color="grey-darken-4",
+                                        rounded=True,
+                                        classes="pa-3",
+                                        style="height: calc(50vh - 120px); overflow-y: auto;",
+                                    ):
+                                        html.Pre(
+                                            "{{ params_batch_metadata }}",
+                                            style="margin: 0; white-space: pre-wrap; font-family: monospace; font-size: 13px;",
+                                        )
+
+                                # Right column - Simulation parameters (already shown in sidebar)
+                                with v3.VCol(cols=12, md=6):
+                                    html.Div(
+                                        "Simulation Parameters",
+                                        classes="text-subtitle-1 mb-2",
+                                    )
+                                    with v3.VSheet(
+                                        color="grey-darken-4",
+                                        rounded=True,
+                                        classes="pa-3",
+                                        style="height: calc(100vh - 240px); overflow-y: auto;",
+                                    ):
+                                        with v3.VExpansionPanels(
+                                            multiple=True, density="compact"
+                                        ):
+                                            with v3.VExpansionPanel(
+                                                v_for="([section, params]) in Object.entries(simulation_parameters_dict)",
+                                                key=("section",),
+                                            ):
+                                                v3.VExpansionPanelTitle("{{ section }}")
+                                                with v3.VExpansionPanelText():
+                                                    with v3.VList(density="compact"):
+                                                        with v3.VListItem(
+                                                            v_for="([key, value]) in Object.entries(params)",
+                                                            key=("key",),
+                                                        ):
+                                                            v3.VListItemTitle(
+                                                                "{{ key }}",
+                                                                classes="text-caption font-weight-bold",
+                                                            )
+                                                            v3.VListItemSubtitle(
+                                                                "{{ value }}",
+                                                                style="white-space: pre-wrap; font-family: monospace; font-size: 11px;",
+                                                            )

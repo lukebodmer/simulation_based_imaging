@@ -37,31 +37,71 @@ class ResidualBlock1D(nn.Module):
 
 
 class ConvRegressor(nn.Module):
-    """CNN + MLP architecture for regression."""
+    """Configurable CNN + MLP architecture for regression.
 
-    def __init__(self, input_dim: int, output_dim: int):
+    Attributes:
+        conv_channels: List of channel sizes for conv layers.
+        pool_size: Output size of adaptive average pooling.
+        regressor_hidden: Hidden layer size in the regressor MLP.
+        dropout: Dropout probability in the regressor.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        conv_channels: list[int] | None = None,
+        pool_size: int = 16,
+        regressor_hidden: int = 512,
+        dropout: float = 0.2,
+    ):
+        """Initialize CNN regressor.
+
+        Args:
+            input_dim: Input feature dimension (not used directly, kept for API consistency).
+            output_dim: Output dimension.
+            conv_channels: List of channel sizes for conv layers. Defaults to [32, 64].
+            pool_size: Output size of adaptive average pooling. Defaults to 16.
+            regressor_hidden: Hidden layer size in the regressor MLP. Defaults to 512.
+            dropout: Dropout probability (0-1). Defaults to 0.2.
+        """
         super().__init__()
 
-        self.feature_extractor = nn.Sequential(
-            nn.Conv1d(1, 32, kernel_size=7, stride=2, padding=3),
-            nn.BatchNorm1d(32),
-            nn.GELU(),
-            ResidualBlock1D(32),
-            nn.Conv1d(32, 64, kernel_size=5, stride=2, padding=2),
-            nn.BatchNorm1d(64),
-            nn.GELU(),
-            ResidualBlock1D(64),
-            nn.AdaptiveAvgPool1d(16),
-        )
+        if conv_channels is None:
+            conv_channels = [32, 64]
 
-        self.flat_dim = 64 * 16
+        self.conv_channels = conv_channels
+        self.pool_size = pool_size
+        self.regressor_hidden = regressor_hidden
+        self.dropout = dropout
+
+        # Build feature extractor dynamically
+        feature_layers = []
+        in_channels = 1
+
+        for i, out_channels in enumerate(conv_channels):
+            # First layer uses larger kernel
+            kernel_size = 7 if i == 0 else 5
+            padding = kernel_size // 2
+            feature_layers.extend([
+                nn.Conv1d(in_channels, out_channels, kernel_size=kernel_size, stride=2, padding=padding),
+                nn.BatchNorm1d(out_channels),
+                nn.GELU(),
+                ResidualBlock1D(out_channels),
+            ])
+            in_channels = out_channels
+
+        feature_layers.append(nn.AdaptiveAvgPool1d(pool_size))
+        self.feature_extractor = nn.Sequential(*feature_layers)
+
+        self.flat_dim = conv_channels[-1] * pool_size
 
         self.regressor = nn.Sequential(
-            nn.Linear(self.flat_dim, 512),
-            nn.LayerNorm(512),
+            nn.Linear(self.flat_dim, regressor_hidden),
+            nn.LayerNorm(regressor_hidden),
             nn.GELU(),
-            nn.Dropout(0.2),
-            nn.Linear(512, output_dim),
+            nn.Dropout(dropout),
+            nn.Linear(regressor_hidden, output_dim),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -73,24 +113,53 @@ class ConvRegressor(nn.Module):
 
 
 class MLPRegressor(nn.Module):
-    """Simple MLP architecture for regression."""
+    """Configurable MLP architecture for regression.
 
-    def __init__(self, input_dim: int, output_dim: int):
+    Attributes:
+        hidden_layers: List of hidden layer sizes.
+        dropout: Dropout probability applied after each hidden layer (except last).
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        hidden_layers: list[int] | None = None,
+        dropout: float = 0.2,
+    ):
+        """Initialize MLP regressor.
+
+        Args:
+            input_dim: Input feature dimension.
+            output_dim: Output dimension.
+            hidden_layers: List of hidden layer sizes. Defaults to [4096, 2048, 1024].
+            dropout: Dropout probability (0-1). Applied after each hidden layer
+                except the last one. Defaults to 0.2.
+        """
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, 4096),
-            nn.BatchNorm1d(4096),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(4096, 2048),
-            nn.BatchNorm1d(2048),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(2048, 1024),
-            nn.BatchNorm1d(1024),
-            nn.ReLU(),
-            nn.Linear(1024, output_dim),
-        )
+
+        if hidden_layers is None:
+            hidden_layers = [4096, 2048, 1024]
+
+        self.hidden_layers = hidden_layers
+        self.dropout = dropout
+
+        layers = []
+        prev_dim = input_dim
+
+        for i, hidden_dim in enumerate(hidden_layers):
+            layers.append(nn.Linear(prev_dim, hidden_dim))
+            layers.append(nn.BatchNorm1d(hidden_dim))
+            layers.append(nn.ReLU())
+            # Apply dropout to all but the last hidden layer
+            if i < len(hidden_layers) - 1 and dropout > 0:
+                layers.append(nn.Dropout(dropout))
+            prev_dim = hidden_dim
+
+        # Output layer
+        layers.append(nn.Linear(prev_dim, output_dim))
+
+        self.net = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
@@ -105,21 +174,48 @@ class NeuralNetworkModel(InverseModel):
     Attributes:
         architecture: Network architecture ("cnn" or "mlp").
         device: Torch device for computation.
+        mlp_hidden_layers: Hidden layer sizes for MLP architecture.
+        mlp_dropout: Dropout probability for MLP architecture.
+        cnn_conv_channels: Conv channel sizes for CNN architecture.
+        cnn_pool_size: Adaptive pool output size for CNN.
+        cnn_regressor_hidden: Hidden layer size in CNN regressor.
+        cnn_dropout: Dropout probability for CNN architecture.
     """
 
     def __init__(
         self,
         name: str = "neural_network",
         architecture: str = "cnn",
+        mlp_hidden_layers: list[int] | None = None,
+        mlp_dropout: float = 0.2,
+        cnn_conv_channels: list[int] | None = None,
+        cnn_pool_size: int = 16,
+        cnn_regressor_hidden: int = 512,
+        cnn_dropout: float = 0.2,
     ):
         """Initialize neural network model.
 
         Args:
             name: Model name.
             architecture: Network architecture ("cnn" or "mlp").
+            mlp_hidden_layers: Hidden layer sizes for MLP. Defaults to [4096, 2048, 1024].
+            mlp_dropout: Dropout probability for MLP (0-1). Defaults to 0.2.
+            cnn_conv_channels: Conv channel sizes for CNN. Defaults to [32, 64].
+            cnn_pool_size: Adaptive pool output size for CNN. Defaults to 16.
+            cnn_regressor_hidden: Hidden layer size in CNN regressor. Defaults to 512.
+            cnn_dropout: Dropout probability for CNN (0-1). Defaults to 0.2.
         """
         super().__init__(name)
         self.architecture = architecture
+        # MLP config
+        self.mlp_hidden_layers = mlp_hidden_layers
+        self.mlp_dropout = mlp_dropout
+        # CNN config
+        self.cnn_conv_channels = cnn_conv_channels
+        self.cnn_pool_size = cnn_pool_size
+        self.cnn_regressor_hidden = cnn_regressor_hidden
+        self.cnn_dropout = cnn_dropout
+
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._model: nn.Module | None = None
         self._input_dim: int | None = None
@@ -135,7 +231,10 @@ class NeuralNetworkModel(InverseModel):
         learning_rate: float = 1e-4,
         weight_decay: float = 1e-4,
         sample_ids: list[str] | None = None,
-        progress_callback: Callable[[int, int, float], None] | None = None,
+        progress_callback: Callable[[int, int, float, float], None] | None = None,
+        early_stopping: bool = False,
+        early_stopping_patience: int = 50,
+        early_stopping_min_delta: float = 0.0,
     ) -> dict[str, float]:
         """Train the neural network.
 
@@ -150,6 +249,9 @@ class NeuralNetworkModel(InverseModel):
             sample_ids: Optional sample identifiers.
             progress_callback: Optional callback for progress updates.
                 Signature: (epoch, total_epochs, train_loss, test_loss) -> None
+            early_stopping: Whether to use early stopping based on test loss.
+            early_stopping_patience: Epochs to wait for improvement before stopping.
+            early_stopping_min_delta: Minimum change to qualify as improvement.
 
         Returns:
             Dictionary with final training and test loss.
@@ -207,6 +309,17 @@ class NeuralNetworkModel(InverseModel):
         scaler = torch.cuda.amp.GradScaler(enabled=self.device.type == "cuda")
 
         self._logger.info(f"Training {self.architecture} model for {epochs} epochs")
+        if early_stopping:
+            self._logger.info(
+                f"Early stopping enabled: patience={early_stopping_patience}, "
+                f"min_delta={early_stopping_min_delta}"
+            )
+
+        # Early stopping state
+        best_test_loss = float("inf")
+        best_model_state = None
+        epochs_without_improvement = 0
+        stopped_early = False
 
         for epoch in range(epochs):
             train_loss = self._train_epoch(
@@ -224,7 +337,37 @@ class NeuralNetworkModel(InverseModel):
             if progress_callback is not None:
                 progress_callback(epoch + 1, epochs, train_loss, test_loss)
 
-        return {"train_loss": train_loss, "test_loss": test_loss}
+            # Early stopping check
+            if early_stopping:
+                if test_loss < best_test_loss - early_stopping_min_delta:
+                    best_test_loss = test_loss
+                    best_model_state = {
+                        k: v.cpu().clone() for k, v in self._model.state_dict().items()
+                    }
+                    epochs_without_improvement = 0
+                else:
+                    epochs_without_improvement += 1
+
+                if epochs_without_improvement >= early_stopping_patience:
+                    self._logger.info(
+                        f"Early stopping triggered at epoch {epoch + 1}. "
+                        f"Best test loss: {best_test_loss:.6e}"
+                    )
+                    stopped_early = True
+                    break
+
+        # Restore best model if early stopping was used
+        if early_stopping and best_model_state is not None:
+            self._model.load_state_dict(best_model_state)
+            self._logger.info(f"Restored best model with test loss: {best_test_loss:.6e}")
+            test_loss = best_test_loss
+
+        return {
+            "train_loss": train_loss,
+            "test_loss": test_loss,
+            "stopped_early": stopped_early,
+            "epochs_completed": epoch + 1,
+        }
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         """Predict outputs for inputs.
@@ -299,10 +442,25 @@ class NeuralNetworkModel(InverseModel):
 
     def _create_model(self) -> nn.Module:
         """Create network based on architecture setting."""
+        assert self._input_dim is not None
+        assert self._output_dim is not None
+
         if self.architecture == "cnn":
-            return ConvRegressor(self._input_dim, self._output_dim)
+            return ConvRegressor(
+                self._input_dim,
+                self._output_dim,
+                conv_channels=self.cnn_conv_channels,
+                pool_size=self.cnn_pool_size,
+                regressor_hidden=self.cnn_regressor_hidden,
+                dropout=self.cnn_dropout,
+            )
         elif self.architecture == "mlp":
-            return MLPRegressor(self._input_dim, self._output_dim)
+            return MLPRegressor(
+                self._input_dim,
+                self._output_dim,
+                hidden_layers=self.mlp_hidden_layers,
+                dropout=self.mlp_dropout,
+            )
         else:
             raise ValueError(f"Unknown architecture: {self.architecture}")
 

@@ -1,0 +1,64 @@
+# multi_cube_1000 Preset
+# Multiple cubic inclusions for testing complex geometries
+
+[preset]
+name = "multi_cube_1000"
+description = "Multiple cubic inclusions for testing complex geometries"
+base_config = "base_parameters.toml"
+default_num_samples = 1000
+
+[sweep.inclusion]
+# Material property ranges
+wave_speed_range = [4.0, 4.0]
+density_range = [4.0, 4.0]
+
+# Geometry ranges [min, max] for each axis
+scaling_range = [
+    [0.1, 0.2],
+    [0.1, 0.2],
+    [0.1, 0.2],
+]
+
+# Inclusion behavior
+allow_rotation = false
+allow_movement = false
+
+# Inclusion type
+is_sphere = false
+is_ellipsoid_of_revolution = false
+is_multi_cubes = true
+is_cube_in_ellipsoid = false
+
+[sweep.cubes]
+quantity_range = [1, 3]
+width_range = [0.1, 0.2]
+
+[sweep.geometry]
+boundary_buffer = 0.05
+
+[fixed.sources]
+number = 6
+frequency = 6.0
+amplitude = 1.0
+radius = 0.05
+
+[fixed.outer_material]
+wave_speed = 2.0
+density = 2.0
+
+[fixed.mesh]
+grid_size = 0.04
+box_size = 1.0
+
+[fixed.solver]
+polynomial_order = 1
+number_of_timesteps = 3000
+
+[fixed.receivers]
+sensors_per_face = 25
+
+[fixed.output]
+image = 3000
+data = 3000
+points = 10
+energy = 100

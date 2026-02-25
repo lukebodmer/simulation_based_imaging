@@ -67,6 +67,8 @@
           # Editable sbimaging package
           editableSbimaging
 
+	  # for gcloud
+	  pkgs.google-cloud-sdk
           # for pyrobustgasp
           pythonPackages.cppimport # this one is in custom-nixpkgs
 

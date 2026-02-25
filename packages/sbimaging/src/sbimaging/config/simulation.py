@@ -135,24 +135,34 @@ class SolverConfig:
     Attributes:
         polynomial_order: Polynomial order for DG method.
         number_of_timesteps: Total number of timesteps to simulate.
+            Mutually exclusive with total_time.
+        total_time: Total simulation time in seconds.
+            Mutually exclusive with number_of_timesteps.
+            When specified, timesteps are computed after mesh generation.
     """
 
     polynomial_order: int = 1
-    number_of_timesteps: int = 10000
+    number_of_timesteps: int | None = 10000
+    total_time: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for TOML serialization."""
-        return {
+        result: dict[str, Any] = {
             "polynomial_order": self.polynomial_order,
-            "number_of_timesteps": self.number_of_timesteps,
         }
+        if self.total_time is not None:
+            result["total_time"] = self.total_time
+        elif self.number_of_timesteps is not None:
+            result["number_of_timesteps"] = self.number_of_timesteps
+        return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "SolverConfig":
         """Create from dictionary."""
         return cls(
             polynomial_order=data.get("polynomial_order", 1),
-            number_of_timesteps=data.get("number_of_timesteps", 10000),
+            number_of_timesteps=data.get("number_of_timesteps"),
+            total_time=data.get("total_time"),
         )
 
 
@@ -191,21 +201,26 @@ class OutputConfig:
         data: Timesteps between data file outputs.
         points: Timesteps between point data outputs.
         energy: Timesteps between energy computation outputs.
+        save_last_timestep_only: If True, only save image/data on final timestep.
     """
 
     image: int = 1000
     data: int = 1000
     points: int = 10
     energy: int = 500
+    save_last_timestep_only: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for TOML serialization."""
-        return {
+        result = {
             "image": self.image,
             "data": self.data,
             "points": self.points,
             "energy": self.energy,
         }
+        if self.save_last_timestep_only:
+            result["save_last_timestep_only"] = True
+        return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "OutputConfig":
@@ -215,6 +230,7 @@ class OutputConfig:
             data=data.get("data", 1000),
             points=data.get("points", 10),
             energy=data.get("energy", 500),
+            save_last_timestep_only=data.get("save_last_timestep_only", False),
         )
 
 

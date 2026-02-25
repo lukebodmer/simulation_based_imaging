@@ -51,12 +51,13 @@ simulation_based_imaging/
 │   │   └── result_viewer/         # View and explore results
 │   └── pyproject.toml
 │
+├── cloud/                         # Cloud computing scripts
+│   └── vastai/                    # Vast.ai worker scripts and docs
+│
 ├── data/                          # Symlink to /data/sbi (git-ignored)
 │   ├── simulations/               # Raw simulation outputs
 │   ├── precomputed/               # Processed results for web display
 │   └── meshes/                    # Generated meshes
-│
-├── old_wave_map_code/             # Legacy code (reference only, delete when done)
 │
 ├── flake.nix                      # Nix development environment
 ├── flake.lock
@@ -166,6 +167,19 @@ Trame-based control panel for directly driving the sbimaging library. This is th
 **Architecture Note**: The hybrid model separates concerns:
 - **React frontend** = Public showcase (can be hosted remotely)
 - **Trame control panel** = Local experimentation (requires GPU, large storage)
+
+## Cloud Simulation (Vast.ai)
+
+For large batch simulations, rent GPU instances on Vast.ai. The `cloud/vastai/` directory contains worker scripts and documentation.
+
+```bash
+# Generate 1000 parameter files
+python packages/sbimaging/src/sbimaging/cli/batch.py generate \
+    --preset multi_cube_1000 --output data/simulations/my_batch
+
+# Rent a 4x RTX 3090 instance and run 4 parallel workers
+# See cloud/vastai/README.md for full instructions
+```
 
 ## Data Storage
 

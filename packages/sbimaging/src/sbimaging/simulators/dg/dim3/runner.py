@@ -129,7 +129,9 @@ class SimulationRunner:
             num_cells=self._mesh.num_cells,
             default_speed=mat.outer_wave_speed,
             default_density=mat.outer_density,
-            inclusion_materials={"Cube": (mat.inclusion_wave_speed, mat.inclusion_density)},
+            inclusion_materials={
+                "Cube": (mat.inclusion_wave_speed, mat.inclusion_density)
+            },
         )
 
         self._logger.info(
@@ -200,10 +202,7 @@ class SimulationRunner:
             locations = [tuple(p) for p in rcv.pressure]
         elif rcv.sensors_per_face:
             src_cfg = self.config.sources
-            exclude = [
-                (tuple(c), r)
-                for c, r in zip(src_cfg.centers, src_cfg.radii)
-            ]
+            exclude = [(tuple(c), r) for c, r in zip(src_cfg.centers, src_cfg.radii)]
             locations = generate_grid_sensors(
                 box_size=self.config.mesh.box_size,
                 sensors_per_face=rcv.sensors_per_face,
@@ -233,6 +232,7 @@ class SimulationRunner:
             sensor_interval=out.sensor_interval,
             data_interval=out.data_interval,
             energy_interval=out.energy_interval,
+            save_last_timestep_only=out.save_last_timestep_only,
         )
 
         if self._sensors and out.sensor_interval > 0:

@@ -190,6 +190,12 @@ class ParameterGenerator:
             if isinstance(values, dict):
                 for key, value in values.items():
                     config[section][key] = value
+                # Handle mutually exclusive solver time fields
+                if section == "solver":
+                    if "total_time" in values:
+                        config[section].pop("number_of_timesteps", None)
+                    elif "number_of_timesteps" in values:
+                        config[section].pop("total_time", None)
             else:
                 config[section] = values
 

@@ -29,11 +29,17 @@ class SourceConfig:
     def __post_init__(self) -> None:
         n = len(self.centers)
         if len(self.radii) != n:
-            raise ValueError(f"radii length ({len(self.radii)}) must match centers ({n})")
+            raise ValueError(
+                f"radii length ({len(self.radii)}) must match centers ({n})"
+            )
         if len(self.amplitudes) != n:
-            raise ValueError(f"amplitudes length ({len(self.amplitudes)}) must match centers ({n})")
+            raise ValueError(
+                f"amplitudes length ({len(self.amplitudes)}) must match centers ({n})"
+            )
         if len(self.frequencies) != n:
-            raise ValueError(f"frequencies length ({len(self.frequencies)}) must match centers ({n})")
+            raise ValueError(
+                f"frequencies length ({len(self.frequencies)}) must match centers ({n})"
+            )
         for i, center in enumerate(self.centers):
             if len(center) != 3:
                 raise ValueError(f"Center {i} must have 3 elements, got {len(center)}")
@@ -130,12 +136,14 @@ class OutputConfig:
         data_interval: Steps between full data saves (0 to disable).
         sensor_interval: Steps between sensor readings.
         energy_interval: Steps between energy calculations (0 to disable).
+        save_last_timestep_only: If True, only save image/data on final timestep.
     """
 
     image_interval: int = 0
     data_interval: int = 0
     sensor_interval: int = 10
     energy_interval: int = 0
+    save_last_timestep_only: bool = False
 
 
 @dataclass
@@ -254,5 +262,8 @@ def _map_output_fields(data: dict) -> dict:
         result["energy_interval"] = data["energy"]
     elif "energy_interval" in data:
         result["energy_interval"] = data["energy_interval"]
+
+    if "save_last_timestep_only" in data:
+        result["save_last_timestep_only"] = data["save_last_timestep_only"]
 
     return result

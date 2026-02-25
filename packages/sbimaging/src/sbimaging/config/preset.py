@@ -4,14 +4,19 @@ Provides functions to discover and load bundled configuration presets
 for simulation batches.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import tomli
 
 from sbimaging.batch.generator import ParameterRange, ParameterSpace
+
+if TYPE_CHECKING:
+    from sbimaging.config.simulation import SimulationConfig
 
 
 @dataclass
@@ -105,11 +110,13 @@ class SolverPreset:
 
     Attributes:
         polynomial_order: DG polynomial order.
-        number_of_timesteps: Total timesteps.
+        number_of_timesteps: Total timesteps (mutually exclusive with total_time).
+        total_time: Total simulation time in seconds (mutually exclusive with number_of_timesteps).
     """
 
     polynomial_order: int = 1
-    number_of_timesteps: int = 10000
+    number_of_timesteps: int | None = 10000
+    total_time: float | None = None
 
 
 @dataclass
@@ -132,12 +139,14 @@ class OutputPreset:
         data: Timesteps between data outputs.
         points: Timesteps between point outputs.
         energy: Timesteps between energy outputs.
+        save_last_timestep_only: If True, only save image/data on final timestep.
     """
 
     image: int = 1000
     data: int = 1000
     points: int = 10
     energy: int = 500
+    save_last_timestep_only: bool = False
 
 
 @dataclass
@@ -200,6 +209,69 @@ class ConfigPreset:
             ),
             cube_count=self.cubes.quantity_range,
             boundary_buffer=self.boundary_buffer,
+        )
+
+    def to_simulation_config(self) -> "SimulationConfig":
+        """Convert preset to a SimulationConfig for the generator.
+
+        Returns:
+            SimulationConfig with fixed parameters from this preset.
+        """
+        from sbimaging.config.simulation import (
+            MeshConfig,
+            OuterMaterialConfig,
+            OutputConfig,
+            ReceiverConfig,
+            SimulationConfig,
+            SolverConfig,
+            SourceConfig,
+        )
+
+        sources = SourceConfig(
+            number=self.sources.number if self.sources else 6,
+            radii=[self.sources.radius if self.sources else 0.05] * (self.sources.number if self.sources else 6),
+            amplitudes=[self.sources.amplitude if self.sources else 1.0] * (self.sources.number if self.sources else 6),
+            frequencies=[self.sources.frequency if self.sources else 3.0] * (self.sources.number if self.sources else 6),
+        )
+
+        outer_material = OuterMaterialConfig(
+            wave_speed=self.outer_material.wave_speed if self.outer_material else 2.0,
+            density=self.outer_material.density if self.outer_material else 2.0,
+        )
+
+        mesh = MeshConfig(
+            grid_size=self.mesh.grid_size if self.mesh else 0.04,
+            box_size=self.mesh.box_size if self.mesh else 1.0,
+        )
+
+        solver = SolverConfig(
+            polynomial_order=self.solver.polynomial_order if self.solver else 1,
+            number_of_timesteps=self.solver.number_of_timesteps if self.solver else None,
+            total_time=self.solver.total_time if self.solver else None,
+        )
+
+        receivers = ReceiverConfig(
+            sensors_per_face=self.receivers.sensors_per_face if self.receivers else 25,
+        )
+
+        output = OutputConfig(
+            image=self.output.image if self.output else 1000,
+            data=self.output.data if self.output else 1000,
+            points=self.output.points if self.output else 10,
+            energy=self.output.energy if self.output else 500,
+            save_last_timestep_only=self.output.save_last_timestep_only if self.output else False,
+        )
+
+        return SimulationConfig(
+            sources=sources,
+            outer_material=outer_material,
+            mesh=mesh,
+            solver=solver,
+            receivers=receivers,
+            output=output,
+            batch_name=self.name,
+            batch_description=self.description,
+            num_samples=self.default_num_samples,
         )
 
 
@@ -341,7 +413,8 @@ def _parse_preset(data: dict[str, Any]) -> ConfigPreset:
         s = fixed["solver"]
         solver = SolverPreset(
             polynomial_order=s.get("polynomial_order", 1),
-            number_of_timesteps=s.get("number_of_timesteps", 10000),
+            number_of_timesteps=s.get("number_of_timesteps"),
+            total_time=s.get("total_time"),
         )
 
     receivers = None
@@ -359,6 +432,7 @@ def _parse_preset(data: dict[str, Any]) -> ConfigPreset:
             data=o.get("data", 1000),
             points=o.get("points", 10),
             energy=o.get("energy", 500),
+            save_last_timestep_only=o.get("save_last_timestep_only", False),
         )
 
     return ConfigPreset(

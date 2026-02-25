@@ -6,7 +6,6 @@ Trame control panel apps in separate processes.
 """
 
 import argparse
-import os
 import signal
 import subprocess
 import sys
@@ -28,6 +27,7 @@ class ServerManager:
     def __init__(self, project_root: Path):
         self.project_root = project_root
         self.processes: list[ServerProcess] = []
+        self._shutting_down = False
 
     def start_django(self, port: int = 8000) -> None:
         """Start the Django development server."""
@@ -74,9 +74,11 @@ class ServerManager:
             print(f"Control panel directory not found: {control_panel_dir}")
             return
 
+        # Start in new process group so we can kill all child processes
         process = subprocess.Popen(
             [sys.executable, "-m", f"apps.{app_name}", "--port", str(port)],
             cwd=control_panel_dir,
+            start_new_session=True,
         )
         self.processes.append(ServerProcess(name=f"trame-{app_name}", process=process))
         print(f"Control panel {app_name} started on http://localhost:{port}")
@@ -88,14 +90,44 @@ class ServerManager:
 
     def shutdown(self) -> None:
         """Terminate all running processes."""
+        # Prevent recursive calls from multiple Ctrl+C
+        if self._shutting_down:
+            return
+        self._shutting_down = True
+
         print("\nShutting down servers...")
-        for server in self.processes:
-            if server.process.poll() is None:
-                server.process.terminate()
-                print(f"Stopped {server.name}")
+        import os as _os
 
         for server in self.processes:
-            server.process.wait()
+            if server.process.poll() is None:
+                try:
+                    # Kill entire process group (includes child processes)
+                    pgid = _os.getpgid(server.process.pid)
+                    _os.killpg(pgid, signal.SIGTERM)
+                except (ProcessLookupError, OSError):
+                    # Process already gone or no process group
+                    server.process.terminate()
+
+        # Wait with timeout, then force kill if necessary
+        for server in self.processes:
+            if server.process.poll() is not None:
+                print(f"Stopped {server.name}")
+                continue
+            try:
+                server.process.wait(timeout=3)
+                print(f"Stopped {server.name}")
+            except subprocess.TimeoutExpired:
+                print(f"Force killing {server.name}...")
+                try:
+                    pgid = _os.getpgid(server.process.pid)
+                    _os.killpg(pgid, signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    server.process.kill()
+                try:
+                    server.process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    pass  # Give up, exit anyway
+                print(f"Killed {server.name}")
 
 
 def main() -> None:
@@ -124,7 +156,11 @@ def main() -> None:
     project_root = Path(__file__).parent.resolve()
     manager = ServerManager(project_root)
 
-    def signal_handler(sig: int, frame: object) -> None:
+    def signal_handler(_sig: int, _frame: object) -> None:
+        if manager._shutting_down:
+            # Second Ctrl+C - force exit immediately
+            print("\nForce exit...")
+            sys.exit(1)
         manager.shutdown()
         sys.exit(0)
 
