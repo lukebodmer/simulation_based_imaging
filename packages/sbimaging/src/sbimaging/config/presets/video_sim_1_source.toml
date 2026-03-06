@@ -1,0 +1,65 @@
+# video_sim_1_source Preset
+# Preset: video_sim_1_source
+
+[preset]
+name = "video_sim_1_source"
+description = "Preset: video_sim_1_source"
+base_config = "base_parameters.toml"
+default_num_samples = 1
+
+[sweep.inclusion]
+# Material property ranges
+wave_speed_range = [4.0, 4.0]
+density_range = [4.0, 4.0]
+
+# Geometry ranges [min, max] for each axis
+scaling_range = [
+    [0.1, 0.3],
+    [0.1, 0.3],
+    [0.1, 0.3],
+]
+
+# Inclusion behavior
+allow_rotation = false
+allow_movement = false
+
+# Inclusion type
+is_sphere = false
+is_ellipsoid_of_revolution = false
+is_multi_cubes = false
+is_cube_in_ellipsoid = false
+
+[sweep.cubes]
+quantity_range = [2, 3]
+width_range = [0.1, 0.2]
+
+[sweep.geometry]
+boundary_buffer = 0.05
+
+[fixed.sources]
+number = 1
+frequency = 6.0
+amplitude = 1.0
+radius = 0.05
+
+[fixed.outer_material]
+wave_speed = 2.0
+density = 2.0
+
+[fixed.mesh]
+grid_size = 0.04
+box_size = 1.0
+
+[fixed.solver]
+polynomial_order = 2
+number_of_timesteps = 2000
+
+[fixed.receivers]
+sensors_per_face = 25
+
+[fixed.output]
+image = 20
+data = 20
+points = 10
+energy = 50
+save_last_timestep_only = false

@@ -37,6 +37,7 @@
         propagatedBuildInputs = with pythonPackages; [
           numpy
           scipy
+	  sklearn-compat
         ];
 
         doCheck = false;

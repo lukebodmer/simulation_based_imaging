@@ -1,56 +1,57 @@
 {
-  "batchName": "multi_cube_500",
+  "batchName": "multi_cube_1000_p2",
   "numSamples": 5,
   "samples": [
     {
       "index": 0,
-      "simHash": "0134855b20",
-      "gridSize": 64,
+      "simHash": "00ccce7ba6",
+      "gridSize": 32,
       "valueRange": {
-        "min": -4.172325134277344e-07,
+        "min": -2.384185791015625e-07,
         "max": 4.0
       },
       "file": "sample_00.json.gz"
     },
     {
       "index": 1,
-      "simHash": "0a4b91e3bf",
-      "gridSize": 64,
+      "simHash": "02c77b7e8d",
+      "gridSize": 32,
       "valueRange": {
-        "min": -3.0540957141056424e-07,
+        "min": -3.427267074584961e-07,
         "max": 4.0
       },
       "file": "sample_01.json.gz"
     },
     {
       "index": 2,
-      "simHash": "1579eb2f6f",
-      "gridSize": 64,
+      "simHash": "0855b11ebb",
+      "gridSize": 32,
       "valueRange": {
-        "min": -4.76837158203125e-07,
+        "min": -2.384185791015625e-07,
         "max": 4.0
       },
       "file": "sample_02.json.gz"
     },
     {
       "index": 3,
-      "simHash": "17bd1e3e38",
-      "gridSize": 64,
+      "simHash": "0c3a7c2d36",
+      "gridSize": 32,
       "valueRange": {
-        "min": -2.703388872760115e-07,
+        "min": -3.5762786865234375e-07,
         "max": 4.0
       },
       "file": "sample_03.json.gz"
     },
     {
       "index": 4,
-      "simHash": "1877f5efd4",
-      "gridSize": 64,
+      "simHash": "0e9b87c57c",
+      "gridSize": 32,
       "valueRange": {
-        "min": -2.736443320827675e-07,
+        "min": -2.384185791015625e-07,
         "max": 4.0
       },
       "file": "sample_04.json.gz"
     }
-  ]
+  ],
+  "modelName": "larger layer test"
 }

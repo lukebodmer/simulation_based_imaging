@@ -92,6 +92,103 @@ def to_numpy(array):
     return np.asarray(array)
 
 
+def get_face_index(x: float, y: float, z: float, box_size: float, origin: float = 0.0, tol: float = 0.01) -> int:
+    """Determine which face a sensor belongs to based on its coordinates.
+
+    Args:
+        x, y, z: Sensor coordinates.
+        box_size: Size of the cubic domain.
+        origin: Minimum coordinate value.
+        tol: Tolerance for boundary detection.
+
+    Returns:
+        Face index (0-5) or -1 if not on a face.
+        Face ordering: 0=Z-bottom, 1=Z-top, 2=Y-front, 3=Y-back, 4=X-left, 5=X-right
+    """
+    if abs(z - origin) < tol:
+        return 0  # Z-bottom
+    if abs(z - (origin + box_size)) < tol:
+        return 1  # Z-top
+    if abs(y - origin) < tol:
+        return 2  # Y-front
+    if abs(y - (origin + box_size)) < tol:
+        return 3  # Y-back
+    if abs(x - origin) < tol:
+        return 4  # X-left
+    if abs(x - (origin + box_size)) < tol:
+        return 5  # X-right
+    return -1
+
+
+def get_sensor_sort_key(x: float, y: float, z: float, face_idx: int) -> tuple:
+    """Get sort key for a sensor within its face for consistent ordering.
+
+    For each face, we want sensors ordered so that the "first" coordinate
+    varies slowest and the "second" coordinate varies fastest, creating
+    a consistent raster pattern across all faces.
+
+    Face ordering uses (primary_coord, secondary_coord):
+    - Face 0 (Z-bottom): (x, y)
+    - Face 1 (Z-top): (x, y)
+    - Face 2 (Y-front): (x, z)
+    - Face 3 (Y-back): (x, z)
+    - Face 4 (X-left): (y, z)
+    - Face 5 (X-right): (y, z)
+    """
+    if face_idx in (0, 1):  # Z faces
+        return (x, y)
+    elif face_idx in (2, 3):  # Y faces
+        return (x, z)
+    else:  # X faces
+        return (y, z)
+
+
+def reorder_sensors_by_face(
+    pressure: np.ndarray,
+    locations: np.ndarray,
+    box_size: float,
+    origin: float = 0.0,
+) -> tuple[np.ndarray, list[int]]:
+    """Reorder sensor data so sensors are grouped by face with consistent ordering.
+
+    Args:
+        pressure: Sensor pressure data, shape (num_sensors, num_timesteps).
+        locations: Sensor coordinates, shape (num_sensors, 3).
+        box_size: Size of the cubic domain.
+        origin: Minimum coordinate value.
+
+    Returns:
+        Tuple of (reordered_pressure, face_boundaries).
+        face_boundaries is a list of row indices where each face starts.
+    """
+    num_sensors = pressure.shape[0]
+
+    # Assign each sensor to a face and compute sort key
+    sensor_info = []
+    for i in range(num_sensors):
+        x, y, z = locations[i]
+        face_idx = get_face_index(x, y, z, box_size, origin)
+        sort_key = get_sensor_sort_key(x, y, z, face_idx)
+        sensor_info.append((i, face_idx, sort_key))
+
+    # Sort by face index first, then by sort key within face
+    sensor_info.sort(key=lambda item: (item[1], item[2]))
+
+    # Reorder pressure data
+    sorted_indices = [item[0] for item in sensor_info]
+    reordered_pressure = pressure[sorted_indices, :]
+
+    # Find face boundaries
+    face_boundaries = [0]
+    current_face = sensor_info[0][1]
+    for i, (_, face_idx, _) in enumerate(sensor_info):
+        if face_idx != current_face:
+            face_boundaries.append(i)
+            current_face = face_idx
+
+    return reordered_pressure, face_boundaries
+
+
 def generate_sensor_grid(
     box_size: float,
     sensors_per_face: int,
@@ -522,17 +619,18 @@ def render_3d_frame(
             point_size=point_size,
             render_points_as_spheres=True,
             opacity=opacity_values,
+            show_scalar_bar=False,
         )
 
     # Add inclusion overlay if mesh data provided
     if show_inclusion and mesh is not None:
         add_inclusion_mesh(plotter, mesh, opacity=inclusion_opacity)
 
-    # Add sensor locations as black dots
+    # Add sensor locations (using Nord text color for consistency)
     if sensor_locations is not None and len(sensor_locations) > 0:
         plotter.add_points(
             sensor_locations,
-            color="black",
+            color=NORD_COLORS["nord4"],
             point_size=8,
             render_points_as_spheres=True,
         )
@@ -696,11 +794,11 @@ def render_3d_frame_isosurface(
     if show_inclusion and mesh is not None:
         add_inclusion_mesh(plotter, mesh, opacity=inclusion_opacity)
 
-    # Add sensor locations as black dots
+    # Add sensor locations (using Nord text color for consistency)
     if sensor_locations is not None and len(sensor_locations) > 0:
         plotter.add_points(
             sensor_locations,
-            color="black",
+            color=NORD_COLORS["nord4"],
             point_size=8,
             render_points_as_spheres=True,
         )
@@ -815,13 +913,16 @@ def create_video_with_sensors_3d(
 
     logger.info(f"Color scale: [{vmin:.4g}, {vmax:.4g}]")
 
+    # Compute domain bounds
+    box_size = x.max() - x.min()  # Assume cubic domain
+    origin = x.min()
+
     # Get sensor data matrix and locations
+    sensor_matrix = None
+    face_boundaries: list[int] = []
+
     if sensor_data is not None and "pressure" in sensor_data:
         sensor_matrix = to_numpy(sensor_data["pressure"])
-        sensor_vmax = np.abs(sensor_matrix).max() if sensor_matrix.size > 0 else 1.0
-    else:
-        sensor_matrix = None
-        sensor_vmax = 1.0
 
     # Get sensor locations if available, or compute from config/sensors_per_face
     config = data.get("config")
@@ -834,10 +935,15 @@ def create_video_with_sensors_3d(
     if sensor_data is not None and "locations" in sensor_data:
         sensor_locations = to_numpy(sensor_data["locations"])
         logger.info(f"Found {len(sensor_locations)} sensor locations in data")
+
+        # Reorder sensor matrix by face if we have locations
+        if sensor_matrix is not None:
+            sensor_matrix, face_boundaries = reorder_sensors_by_face(
+                sensor_matrix, sensor_locations, box_size, origin
+            )
+            logger.info(f"Reordered sensors by face, boundaries: {face_boundaries}")
     elif sensors_per_face is not None:
         # Compute sensor locations from mesh bounds and sensors_per_face
-        box_size = x.max() - x.min()  # Assume cubic domain
-
         # Get source exclusion regions from config
         exclude_regions = None
         if config is not None and "sources" in config:
@@ -850,9 +956,16 @@ def create_video_with_sensors_3d(
                 ]
 
         sensor_locations = np.array(
-            generate_sensor_grid(box_size, sensors_per_face, x.min(), exclude_regions)
+            generate_sensor_grid(box_size, sensors_per_face, origin, exclude_regions)
         )
         logger.info(f"Generated {len(sensor_locations)} sensor locations from grid")
+
+        # Reorder sensor matrix by face if we have locations
+        if sensor_matrix is not None:
+            sensor_matrix, face_boundaries = reorder_sensors_by_face(
+                sensor_matrix, sensor_locations, box_size, origin
+            )
+            logger.info(f"Reordered sensors by face, boundaries: {face_boundaries}")
     else:
         sensor_locations = None
 
@@ -1006,6 +1119,8 @@ def create_video_with_sensors_3d(
                     float(sensor_matrix.shape[0]),
                 )
 
+                # Fixed color scale for sensor data (matches plot_batch_grid.py)
+                sensor_vmax = 0.3
                 im_sensor = ax_sensor.imshow(
                     current_sensor_data,
                     aspect="auto",
@@ -1016,14 +1131,12 @@ def create_video_with_sensors_3d(
                     extent=sensor_extent,
                 )
 
-                # Draw face separator lines
-                if sensors_per_face is not None:
+                # Draw face separator lines at actual face boundaries
+                if face_boundaries:
                     line_color = NORD_COLORS["nord4"] if use_nord_style else "white"
-                    num_faces = sensor_matrix.shape[0] // sensors_per_face
-                    for face_idx in range(1, num_faces):
-                        y_line = face_idx * sensors_per_face
+                    for boundary in face_boundaries[1:]:  # Skip first (always 0)
                         ax_sensor.axhline(
-                            y=y_line, color=line_color, linewidth=1.0, alpha=0.7
+                            y=boundary, color=line_color, linewidth=1.0, alpha=0.7
                         )
 
                 cbar = plt.colorbar(
@@ -1152,24 +1265,42 @@ def render_dev_frame(
         (z.min() + z.max()) / 2,
     )
 
-    # Get sensor locations if available, or try to compute from sensor matrix shape
+    # Compute domain bounds
+    box_size = x.max() - x.min()
+    origin = x.min()
+
+    # Get sensor locations and matrix
     sensor_data = data.get("sensor_data")
     config = data.get("config")
     sensors_per_face = None
+    sensor_matrix = None
+    face_boundaries: list[int] = []
+
     if config is not None:
         receivers = config.get("receivers", {})
         sensors_per_face = receivers.get("sensors_per_face")
+
+    # Get sensor matrix first
+    if sensor_data is not None and "pressure" in sensor_data:
+        sensor_matrix = to_numpy(sensor_data["pressure"])
+
+    # Get sensor locations
     if sensor_data is not None and "locations" in sensor_data:
         sensor_locations = to_numpy(sensor_data["locations"])
         logger.info(f"Found {len(sensor_locations)} sensor locations in data")
+
+        # Reorder sensor matrix by face if we have locations
+        if sensor_matrix is not None:
+            sensor_matrix, face_boundaries = reorder_sensors_by_face(
+                sensor_matrix, sensor_locations, box_size, origin
+            )
+            logger.info(f"Reordered sensors by face, boundaries: {face_boundaries}")
     elif sensor_data is not None and "pressure" in sensor_data:
         # Try to infer sensors_per_face from total sensors (6 faces) if not in config
         if sensors_per_face is None:
             num_sensors = sensor_data["pressure"].shape[0]
             sensors_per_face = num_sensors // 6
         if sensors_per_face is not None and sensors_per_face > 0:
-            box_size = x.max() - x.min()
-
             # Get source exclusion regions from config
             exclude_regions = None
             if config is not None and "sources" in config:
@@ -1182,21 +1313,20 @@ def render_dev_frame(
                     ]
 
             sensor_locations = np.array(
-                generate_sensor_grid(box_size, sensors_per_face, x.min(), exclude_regions)
+                generate_sensor_grid(box_size, sensors_per_face, origin, exclude_regions)
             )
             logger.info(f"Generated {len(sensor_locations)} sensor locations from grid")
+
+            # Reorder sensor matrix by face
+            if sensor_matrix is not None:
+                sensor_matrix, face_boundaries = reorder_sensors_by_face(
+                    sensor_matrix, sensor_locations, box_size, origin
+                )
+                logger.info(f"Reordered sensors by face, boundaries: {face_boundaries}")
         else:
             sensor_locations = None
     else:
         sensor_locations = None
-
-    # Get sensor matrix for the right panel
-    if sensor_data is not None and "pressure" in sensor_data:
-        sensor_matrix = to_numpy(sensor_data["pressure"])
-        sensor_vmax = np.abs(sensor_matrix).max() if sensor_matrix.size > 0 else 1.0
-    else:
-        sensor_matrix = None
-        sensor_vmax = 1.0
 
     # Figure settings (same as main video)
     figsize = (16, 6)
@@ -1291,6 +1421,8 @@ def render_dev_frame(
             float(sensor_matrix.shape[0]),
         )
 
+        # Fixed color scale for sensor data (matches plot_batch_grid.py)
+        sensor_vmax = 0.3
         im_sensor = ax_sensor.imshow(
             current_sensor_data,
             aspect="auto",
@@ -1301,14 +1433,12 @@ def render_dev_frame(
             extent=sensor_extent,
         )
 
-        # Draw face separator lines
-        if sensors_per_face is not None and sensors_per_face > 0:
+        # Draw face separator lines at actual face boundaries
+        if face_boundaries:
             line_color = NORD_COLORS["nord4"]
-            num_faces = sensor_matrix.shape[0] // sensors_per_face
-            for face_idx in range(1, num_faces):
-                y_line = face_idx * sensors_per_face
+            for boundary in face_boundaries[1:]:  # Skip first (always 0)
                 ax_sensor.axhline(
-                    y=y_line, color=line_color, linewidth=1.0, alpha=0.7
+                    y=boundary, color=line_color, linewidth=1.0, alpha=0.7
                 )
 
         cbar = plt.colorbar(

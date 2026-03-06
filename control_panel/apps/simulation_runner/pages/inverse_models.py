@@ -104,6 +104,8 @@ class InverseModelsPage:
         # Training options
         self.state.inv_early_stopping = False
         self.state.inv_early_stopping_patience = 50
+        self.state.inv_kfold_validation = False
+        self.state.inv_kfold_k = 5
 
         # Dynamic compression settings
         self.state.inv_use_dynamic_compression = False
@@ -113,6 +115,10 @@ class InverseModelsPage:
         # Normalization settings
         self.state.inv_use_normalization = False
 
+        # Noise settings
+        self.state.inv_use_noise = False
+        self.state.inv_noise_level = 0.05  # 5% of global peak by default
+
         # Training state
         self.state.inv_is_training = False
         self.state.inv_training_progress = 0
@@ -120,9 +126,15 @@ class InverseModelsPage:
         self.state.inv_training_log = []
 
         # Loss history for plotting (used in train and view tabs)
+        # For regular training: single lists
+        # For K-fold: list of lists (one per fold)
         self._train_losses = []
         self._test_losses = []
         self._loss_epochs = []
+        self._kfold_train_losses = []  # List of lists, one per fold
+        self._kfold_test_losses = []
+        self._kfold_epochs = []
+        self._current_fold = 0
         self.loss_chart_widget = None
         self.view_loss_chart_widget = None
 
@@ -151,6 +163,10 @@ class InverseModelsPage:
         self.state.inv_test_selected_batch = ""
         self.state.inv_test_available_models = []
         self.state.inv_test_selected_model = ""
+        # K-fold fold selection for Test tab
+        self.state.inv_test_is_kfold = False
+        self.state.inv_test_available_folds = []
+        self.state.inv_test_selected_fold = 0  # 0-indexed fold number
         self.state.inv_is_testing = False
         self.state.inv_test_progress = 0
         self.state.inv_test_message = ""
@@ -186,6 +202,8 @@ class InverseModelsPage:
         )
         self.state.change("inv_compression_ratio")(self._on_compression_setting_changed)
         self.state.change("inv_use_normalization")(self._on_compression_setting_changed)
+        self.state.change("inv_use_noise")(self._on_compression_setting_changed)
+        self.state.change("inv_noise_level")(self._on_compression_setting_changed)
         self.state.change("inv_trim_timesteps")(self._on_input_output_changed)
         self.state.change("inv_downsample_factor")(self._on_input_output_changed)
         self.state.change("inv_kspace_grid_size")(self._on_input_output_changed)
@@ -391,7 +409,7 @@ class InverseModelsPage:
         self._update_compression_preview()
 
     def _update_compression_preview(self):
-        """Update the compression/normalization preview chart."""
+        """Update the compression/normalization/noise preview chart."""
         if self.compression_preview_widget is None:
             return
 
@@ -399,10 +417,11 @@ class InverseModelsPage:
 
         use_compression = self.state.inv_use_dynamic_compression
         use_normalization = self.state.inv_use_normalization
+        use_noise = self.state.inv_use_noise
 
-        if self._sample_sensor_data is not None and (
-            use_compression or use_normalization
-        ):
+        any_processing = use_compression or use_normalization or use_noise
+
+        if self._sample_sensor_data is not None and any_processing:
             signal = self._sample_sensor_data
             time_axis = np.arange(len(signal))
 
@@ -419,20 +438,18 @@ class InverseModelsPage:
             # Use global max for threshold calculation (same as training)
             global_max = self._global_sensor_max
 
-            if use_compression and use_normalization:
-                # Apply both: compression first, then normalization
+            # Build processed signal step by step
+            processed = signal.copy()
+            title_parts = []
+
+            # Apply compression if enabled
+            if use_compression:
                 threshold = float(self.state.inv_compression_threshold)
                 ratio = float(self.state.inv_compression_ratio)
-
-                compressed = self._compress_signal_for_preview(signal, threshold, ratio)
-                ax.plot(
-                    time_axis,
-                    compressed,
-                    "r-",
-                    alpha=0.7,
-                    linewidth=0.8,
-                    label="Compressed",
+                processed = self._compress_signal_for_preview(
+                    processed, threshold, ratio
                 )
+                title_parts.append(f"Comp(t={threshold}, r={ratio}:1)")
 
                 # Draw threshold lines (based on global max)
                 thresh_val = threshold * global_max if global_max > 0 else threshold
@@ -453,64 +470,28 @@ class InverseModelsPage:
                     linewidth=0.8,
                 )
 
-                ax.set_title(
-                    f"Compression (t={threshold}, r={ratio}:1) + Normalization",
-                    fontsize=9,
-                )
+            # Apply normalization if enabled
+            if use_normalization:
+                processed = self._normalize_signal_for_preview(processed)
+                title_parts.append("Norm")
 
-            elif use_compression:
-                # Compression only
-                threshold = float(self.state.inv_compression_threshold)
-                ratio = float(self.state.inv_compression_ratio)
+            # Apply noise if enabled
+            if use_noise:
+                noise_level = float(self.state.inv_noise_level)
+                processed = self._add_noise_for_preview(processed, noise_level)
+                title_parts.append(f"Noise({noise_level:.0%})")
 
-                compressed = self._compress_signal_for_preview(signal, threshold, ratio)
-                ax.plot(
-                    time_axis,
-                    compressed,
-                    "r-",
-                    alpha=0.7,
-                    linewidth=0.8,
-                    label="Compressed",
-                )
+            # Plot the processed signal
+            ax.plot(
+                time_axis,
+                processed,
+                "r-",
+                alpha=0.7,
+                linewidth=0.8,
+                label="Processed",
+            )
 
-                # Draw threshold lines (based on global max)
-                thresh_val = threshold * global_max if global_max > 0 else threshold
-                ax.plot(
-                    time_axis,
-                    np.full_like(time_axis, thresh_val, dtype=float),
-                    color="orange",
-                    linestyle="--",
-                    alpha=0.5,
-                    linewidth=0.8,
-                )
-                ax.plot(
-                    time_axis,
-                    np.full_like(time_axis, -thresh_val, dtype=float),
-                    color="orange",
-                    linestyle="--",
-                    alpha=0.5,
-                    linewidth=0.8,
-                )
-
-                ax.set_title(
-                    f"threshold={threshold}, ratio={ratio}:1",
-                    fontsize=9,
-                )
-
-            else:
-                # Normalization only
-                normalized = self._normalize_signal_for_preview(signal)
-                ax.plot(
-                    time_axis,
-                    normalized,
-                    "g-",
-                    alpha=0.7,
-                    linewidth=0.8,
-                    label="Normalized",
-                )
-
-                ax.set_title("Normalization Preview", fontsize=9)
-
+            ax.set_title(" + ".join(title_parts), fontsize=9)
             ax.legend(loc="upper right", fontsize=7)
             ax.set_xlabel("Time Step", fontsize=8)
             ax.set_ylabel("Amplitude", fontsize=8)
@@ -520,6 +501,10 @@ class InverseModelsPage:
             # Fix y-axis to global max for consistent view across signals
             if global_max > 0:
                 margin = global_max * 0.1
+                # Extend y-limits if noise is enabled (can exceed original range)
+                if use_noise:
+                    noise_level = float(self.state.inv_noise_level)
+                    margin = global_max * (0.1 + noise_level)
                 ax.set_ylim(-global_max - margin, global_max + margin)
 
         elif self._sample_sensor_data is not None:
@@ -537,7 +522,9 @@ class InverseModelsPage:
             # Fix y-axis to global max for consistent view across signals
             if self._global_sensor_max > 0:
                 margin = self._global_sensor_max * 0.1
-                ax.set_ylim(-self._global_sensor_max - margin, self._global_sensor_max + margin)
+                ax.set_ylim(
+                    -self._global_sensor_max - margin, self._global_sensor_max + margin
+                )
         else:
             ax.text(
                 0.5,
@@ -609,6 +596,37 @@ class InverseModelsPage:
 
         return result
 
+    def _add_noise_for_preview(
+        self, signal: np.ndarray, noise_level: float
+    ) -> np.ndarray:
+        """Add Gaussian noise to a signal for preview.
+
+        The noise amplitude is computed as a fraction of the global peak
+        across all sensors (self._global_sensor_max), matching the behavior
+        of the actual training noise application.
+
+        Args:
+            signal: 1D signal array.
+            noise_level: Fraction (0-1) of global peak to use as noise std.
+
+        Returns:
+            Signal with added Gaussian noise.
+        """
+        if noise_level <= 0:
+            return signal.copy()
+
+        # Use global max from simulation
+        global_max = self._global_sensor_max
+        if global_max == 0:
+            return signal.copy()
+
+        # Compute noise standard deviation as fraction of global peak
+        noise_std = noise_level * global_max
+
+        # Generate and add noise
+        noise = np.random.normal(0, noise_std, len(signal))
+        return signal + noise
+
     # --- View tab handlers ---
 
     def _on_view_batch_selected(self, inv_view_selected_batch, **kwargs):
@@ -630,10 +648,15 @@ class InverseModelsPage:
         """Handle model selection in view tab - load and display model info."""
         self.state.inv_view_model_info = {}
 
+        # Clear both regular and K-fold history
+        self._loss_epochs = []
+        self._train_losses = []
+        self._test_losses = []
+        self._kfold_epochs = []
+        self._kfold_train_losses = []
+        self._kfold_test_losses = []
+
         if not inv_view_selected_model or not self.state.inv_view_selected_batch:
-            self._loss_epochs = []
-            self._train_losses = []
-            self._test_losses = []
             self._update_view_loss_chart()
             return
 
@@ -657,13 +680,28 @@ class InverseModelsPage:
                 # Load and display training history
                 history = data.get("training_history", {})
                 if history:
-                    self._loss_epochs = history.get("epochs", [])
-                    self._train_losses = history.get("train_loss", [])
-                    self._test_losses = history.get("test_loss", [])
-                    self._update_view_loss_chart()
-                    logger.info(
-                        f"View tab: Loaded training history with {len(self._loss_epochs)} epochs"
-                    )
+                    # Check if this is K-fold history
+                    if "kfold_epochs" in history:
+                        self._kfold_epochs = history.get("kfold_epochs", [])
+                        self._kfold_train_losses = history.get("kfold_train_losses", [])
+                        self._kfold_test_losses = history.get("kfold_test_losses", [])
+                        self._update_view_loss_chart()
+                        k = len(self._kfold_epochs)
+                        total_epochs = sum(len(e) for e in self._kfold_epochs)
+                        logger.info(
+                            f"View tab: Loaded K-fold history with {k} folds, "
+                            f"{total_epochs} total epochs"
+                        )
+                    else:
+                        # Regular training history
+                        self._loss_epochs = history.get("epochs", [])
+                        self._train_losses = history.get("train_loss", [])
+                        self._test_losses = history.get("test_loss", [])
+                        self._update_view_loss_chart()
+                        logger.info(
+                            f"View tab: Loaded training history with "
+                            f"{len(self._loss_epochs)} epochs"
+                        )
 
             except Exception as e:
                 logger.error(f"Failed to load model info: {e}")
@@ -671,12 +709,22 @@ class InverseModelsPage:
     def _extract_model_info(self, data: dict) -> dict:
         """Extract model architecture and training info from saved data."""
         model = data.get("model")
+        models = data.get("models")  # K-fold: list of models
         model_type = data.get("model_type", "unknown")
         model_name = data.get("model_name")
         metrics = data.get("metrics", {})
         test_hashes = data.get("test_hashes", [])
         history = data.get("training_history", {})
         training_config = data.get("training_config", {})
+        is_kfold = data.get("kfold", False)
+        k = data.get("k", 0)
+
+        # Calculate num_epochs for K-fold
+        if "kfold_epochs" in history:
+            total_epochs = sum(len(e) for e in history.get("kfold_epochs", []))
+            num_epochs = total_epochs
+        else:
+            num_epochs = len(history.get("epochs", []))
 
         info = {
             "model_type": model_type,
@@ -684,8 +732,39 @@ class InverseModelsPage:
             "num_test_samples": len(test_hashes),
             "final_train_loss": metrics.get("train_loss", "N/A"),
             "final_test_loss": metrics.get("test_loss", "N/A"),
-            "num_epochs": len(history.get("epochs", [])),
+            "num_epochs": num_epochs,
+            "is_kfold": is_kfold,
+            "k": k,
         }
+
+        # Add K-fold specific info
+        if is_kfold:
+            fold_metrics = metrics.get("fold_metrics", [])
+            if fold_metrics:
+                # Per-fold metrics for display
+                info["fold_details"] = []
+                for i, m in enumerate(fold_metrics):
+                    fold_info = {
+                        "fold": i + 1,
+                        "train_loss": m.get("train_loss", 0),
+                        "test_loss": m.get("test_loss", 0),
+                    }
+                    # Add epochs completed if available (for early stopping)
+                    if "epochs_completed" in m:
+                        fold_info["epochs_completed"] = m["epochs_completed"]
+                    if "stopped_early" in m:
+                        fold_info["stopped_early"] = m["stopped_early"]
+                    info["fold_details"].append(fold_info)
+
+                # Calculate statistics across folds
+                train_losses = [m.get("train_loss", 0) for m in fold_metrics]
+                test_losses = [m.get("test_loss", 0) for m in fold_metrics]
+                info["fold_train_mean"] = np.mean(train_losses)
+                info["fold_train_std"] = np.std(train_losses)
+                info["fold_test_mean"] = np.mean(test_losses)
+                info["fold_test_std"] = np.std(test_losses)
+                info["fold_test_min"] = np.min(test_losses)
+                info["fold_test_max"] = np.max(test_losses)
 
         # Add training config if available
         if training_config:
@@ -774,10 +853,21 @@ class InverseModelsPage:
             )
 
         # Extract architecture info from the model object
-        if model is not None and hasattr(model, "_model") and model._model is not None:
-            nn_model = model._model
+        # For K-fold models, use the first model in the list
+        model_to_inspect = model
+        if model_to_inspect is None and models is not None and len(models) > 0:
+            model_to_inspect = models[0]
+
+        if (
+            model_to_inspect is not None
+            and hasattr(model_to_inspect, "_model")
+            and model_to_inspect._model is not None
+        ):
+            nn_model = model_to_inspect._model
             info["architecture"] = (
-                model.architecture if hasattr(model, "architecture") else "unknown"
+                model_to_inspect.architecture
+                if hasattr(model_to_inspect, "architecture")
+                else "unknown"
             )
 
             # Count parameters
@@ -802,10 +892,10 @@ class InverseModelsPage:
             info["layers"] = layers[:10]  # Limit to first 10 layers
 
             # Get input/output dimensions
-            if hasattr(model, "_input_dim"):
-                info["input_dim"] = model._input_dim
-            if hasattr(model, "_output_dim"):
-                info["output_dim"] = model._output_dim
+            if hasattr(model_to_inspect, "_input_dim"):
+                info["input_dim"] = model_to_inspect._input_dim
+            if hasattr(model_to_inspect, "_output_dim"):
+                info["output_dim"] = model_to_inspect._output_dim
 
         return info
 
@@ -832,6 +922,9 @@ class InverseModelsPage:
         self.state.inv_test_simulations = []
         self.state.inv_selected_test_sim = ""
         self.state.inv_test_metrics = {}
+        self.state.inv_test_is_kfold = False
+        self.state.inv_test_available_folds = []
+        self.state.inv_test_selected_fold = 0
 
         if not inv_test_selected_model or not self.state.inv_test_selected_batch:
             return
@@ -847,6 +940,34 @@ class InverseModelsPage:
             try:
                 with open(model_path, "rb") as f:
                     data = pickle.load(f)
+
+                # Check if this is a K-fold model and populate fold options
+                is_kfold = data.get("kfold", False)
+                if is_kfold:
+                    models = data.get("models", [])
+                    metrics = data.get("metrics", {})
+                    fold_metrics = metrics.get("fold_metrics", [])
+
+                    self.state.inv_test_is_kfold = True
+                    # Create fold options with test loss info
+                    fold_options = []
+                    for i in range(len(models)):
+                        test_loss = (
+                            fold_metrics[i].get("test_loss", 0)
+                            if i < len(fold_metrics)
+                            else 0
+                        )
+                        fold_options.append(
+                            {
+                                "title": f"Fold {i + 1} (loss: {test_loss:.2f})",
+                                "value": i,
+                            }
+                        )
+                    self.state.inv_test_available_folds = fold_options
+                    self.state.inv_test_selected_fold = 0
+                    logger.info(
+                        f"Test tab: K-fold model with {len(models)} folds detected"
+                    )
 
                 test_hashes = data.get("test_hashes", [])
                 self.state.inv_test_simulations = [
@@ -1058,7 +1179,46 @@ class InverseModelsPage:
 
         fig, ax = plt.subplots(figsize=(6, 3))
 
-        if len(self._loss_epochs) > 0:
+        # Check if we have K-fold training data
+        if len(self._kfold_epochs) > 0 and len(self._kfold_train_losses) > 0:
+            # K-fold: plot all folds with different colors
+            cmap = plt.get_cmap("tab10")
+            colors = [cmap(i) for i in range(10)]
+            for fold_idx in range(len(self._kfold_train_losses)):
+                if len(self._kfold_epochs[fold_idx]) > 0:
+                    color = colors[fold_idx % len(colors)]
+                    # Train loss: solid line
+                    ax.semilogy(
+                        self._kfold_epochs[fold_idx],
+                        self._kfold_train_losses[fold_idx],
+                        "-",
+                        color=color,
+                        linewidth=1.0,
+                        alpha=0.7,
+                        label=f"Fold {fold_idx + 1} Train" if fold_idx == 0 else None,
+                    )
+                    # Test loss: dashed line
+                    ax.semilogy(
+                        self._kfold_epochs[fold_idx],
+                        self._kfold_test_losses[fold_idx],
+                        "--",
+                        color=color,
+                        linewidth=1.0,
+                        alpha=0.7,
+                        label=f"Fold {fold_idx + 1} Test" if fold_idx == 0 else None,
+                    )
+            # Add legend showing line style meaning
+            ax.plot([], [], "k-", linewidth=1.0, label="Train (solid)")
+            ax.plot([], [], "k--", linewidth=1.0, label="Test (dashed)")
+            ax.legend(loc="upper right", fontsize=7)
+            ax.set_xlabel("Epoch")
+            ax.set_ylabel("Loss (log scale)")
+            ax.grid(True, alpha=0.3)
+            ax.set_title(
+                f"K-Fold Training Progress (Fold {self._current_fold + 1}/{len(self._kfold_train_losses)})"
+            )
+        elif len(self._loss_epochs) > 0:
+            # Regular training
             ax.semilogy(
                 self._loss_epochs,
                 self._train_losses,
@@ -1077,8 +1237,10 @@ class InverseModelsPage:
             ax.set_xlabel("Epoch")
             ax.set_ylabel("Loss (log scale)")
             ax.grid(True, alpha=0.3)
+            ax.set_title("Training Progress")
+        else:
+            ax.set_title("Training Progress")
 
-        ax.set_title("Training Progress")
         plt.tight_layout()
 
         self.loss_chart_widget.update(fig)
@@ -1091,7 +1253,42 @@ class InverseModelsPage:
 
         fig, ax = plt.subplots(figsize=(8, 4))
 
-        if len(self._loss_epochs) > 0:
+        # Check if we have K-fold training history
+        if len(self._kfold_epochs) > 0 and len(self._kfold_train_losses) > 0:
+            # K-fold: plot all folds with different colors
+            cmap = plt.get_cmap("tab10")
+            colors = [cmap(i) for i in range(10)]
+            for fold_idx in range(len(self._kfold_train_losses)):
+                if len(self._kfold_epochs[fold_idx]) > 0:
+                    color = colors[fold_idx % len(colors)]
+                    # Train loss: solid line
+                    ax.semilogy(
+                        self._kfold_epochs[fold_idx],
+                        self._kfold_train_losses[fold_idx],
+                        "-",
+                        color=color,
+                        linewidth=1.0,
+                        alpha=0.7,
+                        label=f"Fold {fold_idx + 1} Train",
+                    )
+                    # Test loss: dashed line
+                    ax.semilogy(
+                        self._kfold_epochs[fold_idx],
+                        self._kfold_test_losses[fold_idx],
+                        "--",
+                        color=color,
+                        linewidth=1.0,
+                        alpha=0.7,
+                        label=f"Fold {fold_idx + 1} Test",
+                    )
+            ax.legend(loc="upper right", fontsize=7, ncol=2)
+            ax.set_xlabel("Epoch")
+            ax.set_ylabel("Loss (log scale)")
+            ax.grid(True, alpha=0.3)
+            ax.set_title(
+                f"K-Fold Training History ({len(self._kfold_train_losses)} folds)"
+            )
+        elif len(self._loss_epochs) > 0:
             ax.semilogy(
                 self._loss_epochs,
                 self._train_losses,
@@ -1110,8 +1307,10 @@ class InverseModelsPage:
             ax.set_xlabel("Epoch")
             ax.set_ylabel("Loss (log scale)")
             ax.grid(True, alpha=0.3)
+            ax.set_title("Training History")
+        else:
+            ax.set_title("Training History")
 
-        ax.set_title("Training History")
         plt.tight_layout()
 
         self.view_loss_chart_widget.update(fig)
@@ -1137,6 +1336,10 @@ class InverseModelsPage:
         self._loss_epochs = []
         self._train_losses = []
         self._test_losses = []
+        self._kfold_train_losses = []
+        self._kfold_test_losses = []
+        self._kfold_epochs = []
+        self._current_fold = 0
         self._training_start_time = None
         self._training_duration_seconds = None
         self._update_loss_chart()
@@ -1180,81 +1383,137 @@ class InverseModelsPage:
             self._log(f"Loaded {len(sample_ids)} samples")
             self._log(f"Input shape: {X.shape}, Output shape: {y.shape}")
 
-            # Train model
-            self.state.inv_training_message = "Training model..."
-            self.state.inv_training_progress = 20
-            await asyncio.sleep(0)
-
             model_type = self.state.inv_model_type
-            test_fraction = float(self.state.inv_test_fraction)
-
-            # Create progress callback
-            server = self.server
-            page = self
-
-            def progress_callback(
-                epoch: int, total_epochs: int, train_loss: float, test_loss: float
-            ):
-                progress = 20 + int((epoch / total_epochs) * 70)
-
-                def update():
-                    page._loss_epochs.append(epoch)
-                    page._train_losses.append(train_loss)
-                    page._test_losses.append(test_loss)
-
-                    self.state.inv_training_progress = progress
-                    self.state.inv_training_message = (
-                        f"Epoch {epoch}/{total_epochs} | "
-                        f"Train: {train_loss:.6f} | Test: {test_loss:.6f}"
-                    )
-
-                    page._update_loss_chart()
-                    server.state.flush()
-
-                loop.call_soon_threadsafe(update)
+            use_kfold = bool(self.state.inv_kfold_validation)
 
             # Train the model with timing
             self._training_start_time = time.time()
 
-            model, test_hashes, metrics = await loop.run_in_executor(
-                None,
-                lambda: self._train_model(
-                    X,
-                    y,
-                    sample_ids,
-                    model_type,
-                    test_fraction,
-                    progress_callback,
-                ),
-            )
+            if use_kfold:
+                # K-fold cross validation
+                k = int(self.state.inv_kfold_k)
+                self._log(f"Running {k}-fold cross validation")
 
-            self._training_duration_seconds = time.time() - self._training_start_time
+                result = await self._train_kfold(X, y, sample_ids, model_type, k, loop)
+                models, all_predictions, fold_metrics, all_test_hashes = result
 
-            # Log training time
-            duration_str = self._format_duration(self._training_duration_seconds)
-            self._log(f"Training completed in {duration_str}")
+                self._training_duration_seconds = (
+                    time.time() - self._training_start_time
+                )
+                duration_str = self._format_duration(self._training_duration_seconds)
+                self._log(f"K-fold training completed in {duration_str}")
 
-            # Save the model
-            self.state.inv_training_message = "Saving model..."
-            self.state.inv_training_progress = 95
-            await asyncio.sleep(0)
+                # Aggregate metrics
+                avg_test_loss = np.mean([m["test_loss"] for m in fold_metrics])
+                metrics = {
+                    "train_loss": np.mean([m["train_loss"] for m in fold_metrics]),
+                    "test_loss": avg_test_loss,
+                    "fold_metrics": fold_metrics,
+                    "kfold": True,
+                    "k": k,
+                }
 
-            # Use custom name if provided, otherwise generate default
-            custom_name = (
-                self.state.inv_model_name.strip() if self.state.inv_model_name else ""
-            )
-            if custom_name:
-                model_name = custom_name
+                # Save K-fold model (contains all K models and predictions)
+                self.state.inv_training_message = "Saving models..."
+                self.state.inv_training_progress = 95
+                await asyncio.sleep(0)
+
+                custom_name = (
+                    self.state.inv_model_name.strip()
+                    if self.state.inv_model_name
+                    else ""
+                )
+                if custom_name:
+                    model_name = custom_name
+                else:
+                    model_name = f"{model_type}_{k}fold_{len(sample_ids)}samples"
+                model_path = models_dir / f"{model_name}.pkl"
+
+                await loop.run_in_executor(
+                    None,
+                    lambda: self._save_kfold_model(
+                        models, all_predictions, all_test_hashes, model_path, metrics
+                    ),
+                )
+
+                self._log(f"K-fold models saved to {model_path}")
+                self._log(f"Average test loss: {avg_test_loss:.6f}")
+
             else:
-                model_name = f"{model_type}_{len(sample_ids)}samples"
-            model_path = models_dir / f"{model_name}.pkl"
+                # Regular training
+                test_fraction = float(self.state.inv_test_fraction)
 
-            await loop.run_in_executor(
-                None, lambda: self._save_model(model, model_path, test_hashes, metrics)
-            )
+                # Train model
+                self.state.inv_training_message = "Training model..."
+                self.state.inv_training_progress = 20
+                await asyncio.sleep(0)
 
-            self._log(f"Model saved to {model_path}")
-            self._log(f"Test metrics: {metrics}")
+                # Create progress callback
+                server = self.server
+                page = self
+
+                def progress_callback(
+                    epoch: int, total_epochs: int, train_loss: float, test_loss: float
+                ):
+                    progress = 20 + int((epoch / total_epochs) * 70)
+
+                    def update():
+                        page._loss_epochs.append(epoch)
+                        page._train_losses.append(train_loss)
+                        page._test_losses.append(test_loss)
+
+                        self.state.inv_training_progress = progress
+                        self.state.inv_training_message = (
+                            f"Epoch {epoch}/{total_epochs} | "
+                            f"Train: {train_loss:.6f} | Test: {test_loss:.6f}"
+                        )
+
+                        page._update_loss_chart()
+                        server.state.flush()
+
+                    loop.call_soon_threadsafe(update)
+
+                model, test_hashes, metrics = await loop.run_in_executor(
+                    None,
+                    lambda: self._train_model(
+                        X,
+                        y,
+                        sample_ids,
+                        model_type,
+                        test_fraction,
+                        progress_callback,
+                    ),
+                )
+
+                self._training_duration_seconds = (
+                    time.time() - self._training_start_time
+                )
+                duration_str = self._format_duration(self._training_duration_seconds)
+                self._log(f"Training completed in {duration_str}")
+
+                # Save the model
+                self.state.inv_training_message = "Saving model..."
+                self.state.inv_training_progress = 95
+                await asyncio.sleep(0)
+
+                custom_name = (
+                    self.state.inv_model_name.strip()
+                    if self.state.inv_model_name
+                    else ""
+                )
+                if custom_name:
+                    model_name = custom_name
+                else:
+                    model_name = f"{model_type}_{len(sample_ids)}samples"
+                model_path = models_dir / f"{model_name}.pkl"
+
+                await loop.run_in_executor(
+                    None,
+                    lambda: self._save_model(model, model_path, test_hashes, metrics),
+                )
+
+                self._log(f"Model saved to {model_path}")
+                self._log(f"Test metrics: {metrics}")
 
             self.state.inv_training_progress = 100
             self.state.inv_training_message = "Training complete!"
@@ -1281,6 +1540,8 @@ class InverseModelsPage:
             "compression_threshold": float(self.state.inv_compression_threshold),
             "compression_ratio": float(self.state.inv_compression_ratio),
             "use_normalization": bool(self.state.inv_use_normalization),
+            "use_noise": bool(self.state.inv_use_noise),
+            "noise_level": float(self.state.inv_noise_level),
             "kspace_grid_size": int(self.state.inv_kspace_grid_size),
         }
 
@@ -1312,7 +1573,7 @@ class InverseModelsPage:
                     else:
                         # Parameters don't match - need to regenerate
                         logger.info(
-                            f"Preprocessing params changed, will regenerate training data"
+                            "Preprocessing params changed, will regenerate training data"
                         )
                         return False
                 except Exception:
@@ -1320,7 +1581,9 @@ class InverseModelsPage:
                     return False
             else:
                 # No params file - old format, regenerate
-                logger.info("No preprocessing params found, will regenerate training data")
+                logger.info(
+                    "No preprocessing params found, will regenerate training data"
+                )
                 return False
 
         return False
@@ -1358,6 +1621,8 @@ class InverseModelsPage:
                     compression_threshold=current_params["compression_threshold"],
                     compression_ratio=current_params["compression_ratio"],
                     use_normalization=current_params["use_normalization"],
+                    use_noise=current_params["use_noise"],
+                    noise_level=current_params["noise_level"],
                 )
                 with open(sim_dir / "model_input.pkl", "wb") as f:
                     pickle.dump(input_data, f)
@@ -1385,6 +1650,8 @@ class InverseModelsPage:
         compression_threshold: float = 0.1,
         compression_ratio: float = 4.0,
         use_normalization: bool = False,
+        use_noise: bool = False,
+        noise_level: float = 0.05,
     ) -> np.ndarray:
         """Process sensor data for model input.
 
@@ -1396,6 +1663,8 @@ class InverseModelsPage:
             compression_threshold: Amplitude threshold (0-1) for compression.
             compression_ratio: Compression ratio (e.g., 4 means 4:1).
             use_normalization: Whether to normalize each channel to [-1, 1].
+            use_noise: Whether to add Gaussian noise to the signal.
+            noise_level: Fraction (0-1) of global peak to use as noise std.
 
         Returns:
             Flattened sensor data array.
@@ -1430,6 +1699,10 @@ class InverseModelsPage:
         # Apply normalization if enabled
         if use_normalization and sensor_data.ndim == 2:
             sensor_data = self._apply_normalization(sensor_data)
+
+        # Apply noise if enabled
+        if use_noise and sensor_data.ndim == 2:
+            sensor_data = self._apply_noise(sensor_data, noise_level)
 
         return sensor_data.flatten().astype(np.float32)
 
@@ -1496,6 +1769,39 @@ class InverseModelsPage:
             if max_val > 0:
                 normalized[i] = normalized[i] / max_val
         return normalized
+
+    def _apply_noise(
+        self,
+        sensor_data: np.ndarray,
+        noise_level: float = 0.05,
+    ) -> np.ndarray:
+        """Add Gaussian noise to sensor data.
+
+        The noise amplitude is computed as a fraction of the GLOBAL peak
+        across all sensors, so the noise level is consistent relative to
+        the signal strength.
+
+        Args:
+            sensor_data: 2D array (n_sensors, n_timesteps).
+            noise_level: Fraction (0-1) of global peak to use as noise std.
+
+        Returns:
+            Sensor data with added Gaussian noise.
+        """
+        if noise_level <= 0:
+            return sensor_data.copy()
+
+        # Find global max across all channels
+        global_max = np.abs(sensor_data).max()
+        if global_max == 0:
+            return sensor_data.copy()
+
+        # Compute noise standard deviation as fraction of global peak
+        noise_std = noise_level * global_max
+
+        # Generate and add noise
+        noise = np.random.normal(0, noise_std, sensor_data.shape)
+        return sensor_data + noise
 
     def _process_config_to_kspace(
         self, config_file: Path, grid_size: int | None = None
@@ -1635,6 +1941,296 @@ class InverseModelsPage:
 
         return model, test_ids, metrics
 
+    async def _train_kfold(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        sample_ids: list[str],
+        model_type: str,
+        k: int,
+        loop: asyncio.AbstractEventLoop,
+    ) -> tuple[list, dict[str, np.ndarray], list[dict], list[str]]:
+        """Train K models using K-fold cross validation.
+
+        Args:
+            X: Input features (n_samples, n_features).
+            y: Target values (n_samples, n_outputs).
+            sample_ids: List of sample identifiers (simulation hashes).
+            model_type: Type of model to train ('nn_cnn', 'nn_mlp', 'gp').
+            k: Number of folds.
+            loop: Event loop for async execution.
+
+        Returns:
+            Tuple of:
+                - models: List of K trained models
+                - all_predictions: Dict mapping sample_id to prediction array
+                - fold_metrics: List of metrics dicts for each fold
+                - all_test_hashes: List of all sample IDs (each was tested once)
+        """
+        from sklearn.model_selection import KFold
+
+        # Initialize K-fold data structures
+        self._kfold_train_losses = [[] for _ in range(k)]
+        self._kfold_test_losses = [[] for _ in range(k)]
+        self._kfold_epochs = [[] for _ in range(k)]
+
+        kf = KFold(n_splits=k, shuffle=True, random_state=42)
+        sample_ids_arr = np.array(sample_ids)
+
+        models = []
+        all_predictions: dict[str, np.ndarray] = {}
+        fold_metrics = []
+        all_test_hashes: list[str] = []
+
+        for fold_idx, (train_idx, test_idx) in enumerate(kf.split(X)):
+            self._current_fold = fold_idx
+            self._log(f"Training fold {fold_idx + 1}/{k}...")
+
+            X_train, X_test = X[train_idx], X[test_idx]
+            y_train, y_test = y[train_idx], y[test_idx]
+            test_ids = sample_ids_arr[test_idx].tolist()
+
+            # Update progress
+            fold_progress_base = 20 + int((fold_idx / k) * 70)
+            self.state.inv_training_progress = fold_progress_base
+            self.state.inv_training_message = f"Fold {fold_idx + 1}/{k}: Training..."
+            await asyncio.sleep(0)
+
+            # Create progress callback for this fold
+            # Capture variables in closure by passing as default arguments
+            def make_progress_callback(
+                fold: int,
+                fold_base: int,
+                k_folds: int,
+                page_ref: "InverseModelsPage",
+                server_ref,
+                loop_ref,
+            ):
+                def progress_callback(
+                    epoch: int, total_epochs: int, train_loss: float, test_loss: float
+                ):
+                    fold_progress = fold_base + int(
+                        (epoch / total_epochs) * (70 / k_folds)
+                    )
+
+                    def update():
+                        page_ref._kfold_epochs[fold].append(epoch)
+                        page_ref._kfold_train_losses[fold].append(train_loss)
+                        page_ref._kfold_test_losses[fold].append(test_loss)
+
+                        page_ref.state.inv_training_progress = fold_progress
+                        page_ref.state.inv_training_message = (
+                            f"Fold {fold + 1}/{k_folds} | Epoch {epoch}/{total_epochs} | "
+                            f"Train: {train_loss:.6f} | Test: {test_loss:.6f}"
+                        )
+
+                        page_ref._update_loss_chart()
+                        server_ref.state.flush()
+
+                    loop_ref.call_soon_threadsafe(update)
+
+                return progress_callback
+
+            progress_cb = make_progress_callback(
+                fold_idx, fold_progress_base, k, self, self.server, loop
+            )
+
+            # Train model for this fold
+            # Bind loop variables via default arguments to avoid closure issues
+            if model_type.startswith("nn"):
+                model, metrics = await loop.run_in_executor(
+                    None,
+                    lambda xtr=X_train, ytr=y_train, xte=X_test, yte=y_test, mt=model_type, cb=progress_cb: (
+                        self._train_single_fold(xtr, ytr, xte, yte, mt, cb)
+                    ),
+                )
+            else:
+                # GP model
+                model, metrics = await loop.run_in_executor(
+                    None,
+                    lambda xtr=X_train, ytr=y_train, xte=X_test, yte=y_test, mt=model_type: (
+                        self._train_single_fold_gp(xtr, ytr, xte, yte, mt)
+                    ),
+                )
+
+            models.append(model)
+            fold_metrics.append(metrics)
+
+            # Generate predictions for test samples in this fold
+            for i, sample_id in enumerate(test_ids):
+                X_single = X_test[i : i + 1]
+                pred = model.predict(X_single)
+                all_predictions[sample_id] = pred.ravel()
+                all_test_hashes.append(sample_id)
+
+            self._log(
+                f"Fold {fold_idx + 1}: Train={metrics['train_loss']:.6f}, "
+                f"Test={metrics['test_loss']:.6f}"
+            )
+
+        return models, all_predictions, fold_metrics, all_test_hashes
+
+    def _train_single_fold(
+        self,
+        X_train: np.ndarray,
+        y_train: np.ndarray,
+        X_test: np.ndarray,
+        y_test: np.ndarray,
+        model_type: str,
+        progress_callback,
+    ) -> tuple:
+        """Train a single fold for neural network models."""
+        from sbimaging.inverse_models.nn.network import NeuralNetworkModel
+
+        architecture = "cnn" if model_type == "nn_cnn" else "mlp"
+
+        # Parse architecture config
+        mlp_hidden_layers = self._parse_hidden_layers(self.state.inv_mlp_hidden_layers)
+        mlp_dropout = float(self.state.inv_mlp_dropout)
+        cnn_conv_channels = self._parse_hidden_layers(self.state.inv_cnn_conv_channels)
+        cnn_pool_size = int(self.state.inv_cnn_pool_size)
+        cnn_regressor_hidden = int(self.state.inv_cnn_regressor_hidden)
+        cnn_dropout = float(self.state.inv_cnn_dropout)
+
+        model = NeuralNetworkModel(
+            name=model_type,
+            architecture=architecture,
+            mlp_hidden_layers=mlp_hidden_layers,
+            mlp_dropout=mlp_dropout,
+            cnn_conv_channels=cnn_conv_channels,
+            cnn_pool_size=cnn_pool_size,
+            cnn_regressor_hidden=cnn_regressor_hidden,
+            cnn_dropout=cnn_dropout,
+        )
+
+        # Train with pre-split data (test_fraction=0 since we already split)
+        # Combine train/test for the model's internal handling
+        X_combined = np.vstack([X_train, X_test])
+        y_combined = np.vstack([y_train, y_test])
+
+        # Create sample IDs for combined data
+        n_train = len(X_train)
+        n_test = len(X_test)
+        sample_ids = [f"train_{i}" for i in range(n_train)] + [
+            f"test_{i}" for i in range(n_test)
+        ]
+
+        # Set test fraction to match our split
+        test_fraction = n_test / (n_train + n_test)
+
+        metrics = model.train(
+            X_combined,
+            y_combined,
+            test_fraction=test_fraction,
+            epochs=int(self.state.inv_epochs),
+            batch_size=int(self.state.inv_batch_size),
+            learning_rate=float(self.state.inv_learning_rate),
+            sample_ids=sample_ids,
+            progress_callback=progress_callback,
+            early_stopping=bool(self.state.inv_early_stopping),
+            early_stopping_patience=int(self.state.inv_early_stopping_patience),
+        )
+
+        return model, metrics
+
+    def _train_single_fold_gp(
+        self,
+        X_train: np.ndarray,
+        y_train: np.ndarray,
+        X_test: np.ndarray,
+        y_test: np.ndarray,
+        model_type: str,
+    ) -> tuple:
+        """Train a single fold for Gaussian Process models."""
+        from sbimaging.inverse_models.gp.emulator import GaussianProcessModel
+
+        model = GaussianProcessModel(name=model_type)
+        model.train(X_train, y_train)
+
+        # Evaluate on test set
+        metrics = model.evaluate(X_test, y_test)
+
+        return model, metrics
+
+    def _save_kfold_model(
+        self,
+        models: list,
+        all_predictions: dict[str, np.ndarray],
+        all_test_hashes: list[str],
+        path: Path,
+        metrics: dict,
+    ):
+        """Save K-fold trained models with predictions and metadata."""
+        data = {
+            "models": models,  # List of K models
+            "model_type": self.state.inv_model_type,
+            "model_name": self.state.inv_model_name.strip()
+            if self.state.inv_model_name
+            else None,
+            "test_hashes": all_test_hashes,  # All samples (each tested once)
+            "predictions": all_predictions,  # Dict: sample_id -> prediction
+            "metrics": metrics,
+            "kfold": True,
+            "k": int(self.state.inv_kfold_k),
+            "training_config": {
+                "epochs": int(self.state.inv_epochs),
+                "batch_size": int(self.state.inv_batch_size),
+                "learning_rate": float(self.state.inv_learning_rate),
+                "training_duration_seconds": self._training_duration_seconds,
+                "early_stopping": bool(self.state.inv_early_stopping),
+                "early_stopping_patience": int(self.state.inv_early_stopping_patience),
+                "kfold": True,
+                "k": int(self.state.inv_kfold_k),
+            },
+            "architecture_config": {
+                "mlp_hidden_layers": self._parse_hidden_layers(
+                    self.state.inv_mlp_hidden_layers
+                ),
+                "mlp_dropout": float(self.state.inv_mlp_dropout),
+                "cnn_conv_channels": self._parse_hidden_layers(
+                    self.state.inv_cnn_conv_channels
+                ),
+                "cnn_pool_size": int(self.state.inv_cnn_pool_size),
+                "cnn_regressor_hidden": int(self.state.inv_cnn_regressor_hidden),
+                "cnn_dropout": float(self.state.inv_cnn_dropout),
+            },
+            "kspace_config": {
+                "grid_size": int(self.state.inv_kspace_grid_size),
+            },
+            "preprocessing_config": {
+                "trim_timesteps": int(self.state.inv_trim_timesteps),
+                "downsample_factor": int(self.state.inv_downsample_factor),
+                "use_dynamic_compression": bool(self.state.inv_use_dynamic_compression),
+                "compression_threshold": float(self.state.inv_compression_threshold),
+                "compression_ratio": float(self.state.inv_compression_ratio),
+                "use_normalization": bool(self.state.inv_use_normalization),
+                "use_noise": bool(self.state.inv_use_noise),
+                "noise_level": float(self.state.inv_noise_level),
+            },
+            "training_history": {
+                "kfold_epochs": [list(e) for e in self._kfold_epochs],
+                "kfold_train_losses": [
+                    list(losses) for losses in self._kfold_train_losses
+                ],
+                "kfold_test_losses": [
+                    list(losses) for losses in self._kfold_test_losses
+                ],
+            },
+        }
+
+        with open(path, "wb") as f:
+            pickle.dump(data, f)
+
+        # Also save predictions to the predictions directory
+        batch_name = self.state.inv_selected_batch
+        predictions_dir = DEFAULT_DATA_DIR / batch_name / "predictions" / path.stem
+        predictions_dir.mkdir(parents=True, exist_ok=True)
+
+        for sample_id, prediction in all_predictions.items():
+            pred_file = predictions_dir / f"{sample_id}.pkl"
+            with open(pred_file, "wb") as f:
+                pickle.dump(prediction, f)
+
     def _save_model(self, model, path: Path, test_hashes: list[str], metrics: dict):
         """Save the trained model with metadata and training history."""
         data = {
@@ -1647,7 +2243,9 @@ class InverseModelsPage:
             "metrics": metrics,
             "training_config": {
                 "epochs": int(self.state.inv_epochs),
-                "epochs_completed": metrics.get("epochs_completed", int(self.state.inv_epochs)),
+                "epochs_completed": metrics.get(
+                    "epochs_completed", int(self.state.inv_epochs)
+                ),
                 "batch_size": int(self.state.inv_batch_size),
                 "learning_rate": float(self.state.inv_learning_rate),
                 "test_fraction": float(self.state.inv_test_fraction),
@@ -1678,6 +2276,8 @@ class InverseModelsPage:
                 "compression_threshold": float(self.state.inv_compression_threshold),
                 "compression_ratio": float(self.state.inv_compression_ratio),
                 "use_normalization": bool(self.state.inv_use_normalization),
+                "use_noise": bool(self.state.inv_use_noise),
+                "noise_level": float(self.state.inv_noise_level),
             },
             "training_history": {
                 "epochs": self._loss_epochs.copy(),
@@ -1707,16 +2307,40 @@ class InverseModelsPage:
 
         batch_dir = DEFAULT_DATA_DIR / batch_name
         model_path = batch_dir / "inverse_models" / f"{model_name}.pkl"
-        # Save predictions in a subfolder named after the model
-        predictions_dir = batch_dir / "predictions" / model_name
-        predictions_dir.mkdir(parents=True, exist_ok=True)
 
         try:
             # Load model and its preprocessing config
             with open(model_path, "rb") as f:
                 data = pickle.load(f)
 
-            model = data.get("model")
+            # Handle K-fold models: extract the selected fold's model
+            is_kfold = data.get("kfold", False)
+            if is_kfold:
+                models = data.get("models", [])
+                selected_fold = int(self.state.inv_test_selected_fold)
+                if selected_fold < len(models):
+                    model = models[selected_fold]
+                    logger.info(f"Using K-fold model from fold {selected_fold + 1}")
+                else:
+                    logger.error(f"Invalid fold index {selected_fold}")
+                    self.state.inv_test_message = "Error: Invalid fold selection"
+                    return
+                # For K-fold, save predictions in a fold-specific subfolder
+                predictions_dir = (
+                    batch_dir / "predictions" / f"{model_name}_fold{selected_fold + 1}"
+                )
+            else:
+                model = data.get("model")
+                # Save predictions in a subfolder named after the model
+                predictions_dir = batch_dir / "predictions" / model_name
+
+            predictions_dir.mkdir(parents=True, exist_ok=True)
+
+            if model is None:
+                logger.error("No model found in saved data")
+                self.state.inv_test_message = "Error: No model found"
+                return
+
             test_hashes = data.get("test_hashes", [])
             preprocessing_config = data.get("preprocessing_config", {})
 
@@ -1724,13 +2348,20 @@ class InverseModelsPage:
             trim_timesteps = preprocessing_config.get("trim_timesteps", 45)
             downsample_factor = preprocessing_config.get("downsample_factor", 2)
             use_compression = preprocessing_config.get("use_dynamic_compression", False)
-            compression_threshold = preprocessing_config.get("compression_threshold", 0.1)
+            compression_threshold = preprocessing_config.get(
+                "compression_threshold", 0.1
+            )
             compression_ratio = preprocessing_config.get("compression_ratio", 4.0)
             use_normalization = preprocessing_config.get("use_normalization", False)
+            # Note: We don't apply noise during testing - noise was used during
+            # training to make the model robust, but we test on clean signals
+            use_noise = preprocessing_config.get("use_noise", False)
+            noise_level = preprocessing_config.get("noise_level", 0.0)
 
             logger.info(
                 f"Testing with preprocessing: trim={trim_timesteps}, "
                 f"downsample={downsample_factor}, compression={use_compression}"
+                + (f", trained with noise={noise_level:.0%}" if use_noise else "")
             )
 
             self.state.inv_test_message = f"Testing on {len(test_hashes)} samples..."
@@ -1797,7 +2428,9 @@ class InverseModelsPage:
         with v3.VContainer(fluid=True, classes="pa-0"):
             with v3.VCard(classes="fill-height"):
                 # Tabs
-                with v3.VTabs(v_model=("inv_active_tab",), density="compact", align_tabs="center"):
+                with v3.VTabs(
+                    v_model=("inv_active_tab",), density="compact", align_tabs="center"
+                ):
                     v3.VTab(value="train", text="Train")
                     v3.VTab(value="view", text="View")
                     v3.VTab(value="test", text="Test")
@@ -1894,6 +2527,7 @@ class InverseModelsPage:
                                 density="compact",
                                 hint="Fraction held for testing",
                                 persistent_hint=True,
+                                disabled=("inv_kfold_validation",),
                             )
 
                 # === INPUT/OUTPUT SECTION ===
@@ -2066,6 +2700,32 @@ class InverseModelsPage:
                             classes="mt-0",
                         )
 
+                        v3.VCheckbox(
+                            v_model=("inv_use_noise",),
+                            label="Noise",
+                            density="compact",
+                            hide_details=True,
+                            classes="mt-0",
+                        )
+
+                        with v3.VRow(
+                            dense=True,
+                            v_show=("inv_use_noise",),
+                            classes="ml-4",
+                        ):
+                            with v3.VCol(cols=12):
+                                v3.VTextField(
+                                    v_model=("inv_noise_level",),
+                                    label="Level (% of peak)",
+                                    type="number",
+                                    step="0.01",
+                                    min="0",
+                                    max="1",
+                                    density="compact",
+                                    hint="0-1 (e.g., 0.05 = 5%)",
+                                    persistent_hint=True,
+                                )
+
                     # Right side: signal preview chart
                     with v3.VCol(cols=7):
                         with html.Div(v_show=("inv_selected_batch",)):
@@ -2123,6 +2783,24 @@ class InverseModelsPage:
                             hint="Epochs to wait for improvement",
                             persistent_hint=True,
                         )
+                with v3.VRow(dense=True, align="center", classes="mt-1"):
+                    with v3.VCol(cols="auto"):
+                        v3.VCheckbox(
+                            v_model=("inv_kfold_validation",),
+                            label="K-Fold Cross Validation",
+                            density="compact",
+                            hide_details=True,
+                            classes="mt-0",
+                        )
+                    with v3.VCol(cols=2, v_show=("inv_kfold_validation",)):
+                        v3.VTextField(
+                            v_model=("inv_kfold_k",),
+                            label="K",
+                            type="number",
+                            density="compact",
+                            hint="Number of folds",
+                            persistent_hint=True,
+                        )
 
                 # Train button
                 v3.VBtn(
@@ -2164,8 +2842,8 @@ class InverseModelsPage:
     def _build_view_tab(self):
         """Build the View tab content for inspecting trained models."""
         with v3.VRow():
-            # Left side: Model selection
-            with v3.VCol(cols=12, md=4):
+            # Left side: Model selection (narrow column)
+            with v3.VCol(cols=12, md=2):
                 # Batch selection
                 with v3.VRow(align="center", dense=True):
                     with v3.VCol(cols=10):
@@ -2195,7 +2873,7 @@ class InverseModelsPage:
                 )
 
             # Middle: Model info
-            with v3.VCol(cols=12, md=4):
+            with v3.VCol(cols=12, md=5):
                 with v3.VCard(
                     v_if=("Object.keys(inv_view_model_info).length > 0",),
                     variant="outlined",
@@ -2214,6 +2892,14 @@ class InverseModelsPage:
                                 with v3.VListItemTitle():
                                     html.Span("Model Type: ")
                                     html.Strong("{{ inv_view_model_info.model_type }}")
+
+                            # K-fold indicator
+                            with v3.VListItem(v_if=("inv_view_model_info.is_kfold",)):
+                                with v3.VListItemTitle():
+                                    html.Span("K-Fold: ")
+                                    html.Strong(
+                                        "{{ inv_view_model_info.k }}-fold cross validation"
+                                    )
 
                             # Architecture
                             with v3.VListItem(
@@ -2237,7 +2923,9 @@ class InverseModelsPage:
 
                             # MLP dropout
                             with v3.VListItem(
-                                v_if=("inv_view_model_info.mlp_dropout !== undefined && inv_view_model_info.architecture === 'mlp'",)
+                                v_if=(
+                                    "inv_view_model_info.mlp_dropout !== undefined && inv_view_model_info.architecture === 'mlp'",
+                                )
                             ):
                                 with v3.VListItemTitle():
                                     html.Span("Dropout: ")
@@ -2245,7 +2933,9 @@ class InverseModelsPage:
 
                             # CNN conv channels (only for CNN architecture)
                             with v3.VListItem(
-                                v_if=("inv_view_model_info.cnn_conv_channels_str && inv_view_model_info.architecture === 'cnn'",)
+                                v_if=(
+                                    "inv_view_model_info.cnn_conv_channels_str && inv_view_model_info.architecture === 'cnn'",
+                                )
                             ):
                                 with v3.VListItemTitle():
                                     html.Span("Conv Channels: ")
@@ -2255,15 +2945,21 @@ class InverseModelsPage:
 
                             # CNN pool size
                             with v3.VListItem(
-                                v_if=("inv_view_model_info.cnn_pool_size !== undefined && inv_view_model_info.architecture === 'cnn'",)
+                                v_if=(
+                                    "inv_view_model_info.cnn_pool_size !== undefined && inv_view_model_info.architecture === 'cnn'",
+                                )
                             ):
                                 with v3.VListItemTitle():
                                     html.Span("Pool Size: ")
-                                    html.Strong("{{ inv_view_model_info.cnn_pool_size }}")
+                                    html.Strong(
+                                        "{{ inv_view_model_info.cnn_pool_size }}"
+                                    )
 
                             # CNN regressor hidden
                             with v3.VListItem(
-                                v_if=("inv_view_model_info.cnn_regressor_hidden !== undefined && inv_view_model_info.architecture === 'cnn'",)
+                                v_if=(
+                                    "inv_view_model_info.cnn_regressor_hidden !== undefined && inv_view_model_info.architecture === 'cnn'",
+                                )
                             ):
                                 with v3.VListItemTitle():
                                     html.Span("Regressor Hidden: ")
@@ -2273,7 +2969,9 @@ class InverseModelsPage:
 
                             # CNN dropout
                             with v3.VListItem(
-                                v_if=("inv_view_model_info.cnn_dropout !== undefined && inv_view_model_info.architecture === 'cnn'",)
+                                v_if=(
+                                    "inv_view_model_info.cnn_dropout !== undefined && inv_view_model_info.architecture === 'cnn'",
+                                )
                             ):
                                 with v3.VListItemTitle():
                                     html.Span("Dropout: ")
@@ -2440,12 +3138,14 @@ class InverseModelsPage:
                                         "{{ inv_view_model_info.num_test_samples }}"
                                     )
 
-                            # Final losses
+                            # Final losses (show "Avg" prefix for K-fold)
                             with v3.VListItem(
                                 v_if=("inv_view_model_info.final_train_loss",)
                             ):
                                 with v3.VListItemTitle():
-                                    html.Span("Final Train Loss: ")
+                                    html.Span(
+                                        "{{ inv_view_model_info.is_kfold ? 'Avg Train Loss: ' : 'Final Train Loss: ' }}"
+                                    )
                                     html.Strong(
                                         "{{ typeof inv_view_model_info.final_train_loss === 'number' ? inv_view_model_info.final_train_loss.toExponential(4) : inv_view_model_info.final_train_loss }}"
                                     )
@@ -2454,7 +3154,9 @@ class InverseModelsPage:
                                 v_if=("inv_view_model_info.final_test_loss",)
                             ):
                                 with v3.VListItemTitle():
-                                    html.Span("Final Test Loss: ")
+                                    html.Span(
+                                        "{{ inv_view_model_info.is_kfold ? 'Avg Test Loss: ' : 'Final Test Loss: ' }}"
+                                    )
                                     html.Strong(
                                         "{{ typeof inv_view_model_info.final_test_loss === 'number' ? inv_view_model_info.final_test_loss.toExponential(4) : inv_view_model_info.final_test_loss }}"
                                     )
@@ -2475,8 +3177,61 @@ class InverseModelsPage:
                                     html.Span("Trained on Batch: ")
                                     html.Strong("{{ inv_view_model_info.batch_name }}")
 
+                        # K-Fold per-fold details section
+                        with html.Div(
+                            v_if=(
+                                "inv_view_model_info.is_kfold && inv_view_model_info.fold_details",
+                            )
+                        ):
+                            v3.VDivider(classes="my-2")
+                            html.Div(
+                                "Per-Fold Results",
+                                classes="text-caption text-medium-emphasis mb-1",
+                            )
+
+                            # Summary statistics
+                            with v3.VList(density="compact"):
+                                with v3.VListItem():
+                                    with v3.VListItemTitle():
+                                        html.Span("Test Loss Mean: ")
+                                        html.Strong(
+                                            "{{ inv_view_model_info.fold_test_mean?.toExponential(4) }}"
+                                        )
+                                        html.Span(
+                                            " ± {{ inv_view_model_info.fold_test_std?.toExponential(4) }}",
+                                            classes="text-medium-emphasis",
+                                        )
+                                with v3.VListItem():
+                                    with v3.VListItemTitle():
+                                        html.Span("Test Loss Range: ")
+                                        html.Strong(
+                                            "{{ inv_view_model_info.fold_test_min?.toExponential(4) }} - {{ inv_view_model_info.fold_test_max?.toExponential(4) }}"
+                                        )
+
+                            # Per-fold table
+                            with v3.VTable(density="compact", classes="mt-2"):
+                                with html.Thead():
+                                    with html.Tr():
+                                        html.Th("Fold", classes="text-left")
+                                        html.Th("Train Loss", classes="text-right")
+                                        html.Th("Test Loss", classes="text-right")
+                                with html.Tbody():
+                                    with html.Tr(
+                                        v_for="(fold, index) in inv_view_model_info.fold_details",
+                                        key="index",
+                                    ):
+                                        html.Td("{{ fold.fold }}")
+                                        html.Td(
+                                            "{{ fold.train_loss.toExponential(4) }}",
+                                            classes="text-right",
+                                        )
+                                        html.Td(
+                                            "{{ fold.test_loss.toExponential(4) }}",
+                                            classes="text-right",
+                                        )
+
             # Right side: Training history chart
-            with v3.VCol(cols=12, md=4):
+            with v3.VCol(cols=12, md=5):
                 html.Div("Training History", classes="text-subtitle-1 mb-2")
                 with v3.VSheet(
                     rounded=True,
@@ -2510,7 +3265,7 @@ class InverseModelsPage:
                         )
 
             # Model selection
-            with v3.VCol(cols=12, md=3):
+            with v3.VCol(cols=12, md=2):
                 v3.VSelect(
                     v_model=("inv_test_selected_model",),
                     items=("inv_test_available_models",),
@@ -2518,6 +3273,15 @@ class InverseModelsPage:
                     density="compact",
                     clearable=True,
                     disabled=("!inv_test_selected_batch",),
+                )
+
+            # Fold selection (only visible for K-fold models)
+            with v3.VCol(cols=12, md=1, v_if=("inv_test_is_kfold",)):
+                v3.VSelect(
+                    v_model=("inv_test_selected_fold",),
+                    items=("inv_test_available_folds",),
+                    label="Fold",
+                    density="compact",
                 )
 
             # Test button and progress

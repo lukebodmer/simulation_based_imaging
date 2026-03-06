@@ -88,6 +88,7 @@ def export_sample(
     prediction_path: Path,
     output_path: Path,
     sample_index: int,
+    prediction_scale: float = 1.0,
 ) -> dict | None:
     """Export a single ground truth / prediction pair.
 
@@ -97,6 +98,7 @@ def export_sample(
         prediction_path: Path to prediction .pkl file.
         output_path: Output directory for JSON files.
         sample_index: Index of this sample (0-4).
+        prediction_scale: Scale factor to boost prediction values before normalization.
 
     Returns:
         Metadata dict or None if export fails.
@@ -124,6 +126,10 @@ def export_sample(
     if gt_voxels is None or pred_voxels is None:
         print(f"  Failed to convert k-space to voxels")
         return None
+
+    # Apply scale factor to prediction
+    if prediction_scale != 1.0:
+        pred_voxels = pred_voxels * prediction_scale
 
     # Compute shared normalization from ground truth
     gt_norm, vmin, vmax = normalize_voxels(gt_voxels)
@@ -197,6 +203,20 @@ def main():
         default=str(DEFAULT_DATA_DIR),
         help=f"Data directory (default: {DEFAULT_DATA_DIR})",
     )
+    parser.add_argument(
+        "-m",
+        "--model",
+        type=str,
+        default=None,
+        help="Model subfolder name within predictions/ (e.g., 'larger cnn')",
+    )
+    parser.add_argument(
+        "-s",
+        "--prediction-scale",
+        type=float,
+        default=1.0,
+        help="Scale factor to boost prediction values (default: 1.0)",
+    )
 
     args = parser.parse_args()
 
@@ -214,6 +234,17 @@ def main():
     if not predictions_dir.exists():
         print(f"Error: Predictions directory not found: {predictions_dir}")
         return 1
+
+    # If model is specified, use that subfolder
+    if args.model:
+        predictions_dir = predictions_dir / args.model
+        if not predictions_dir.exists():
+            print(f"Error: Model predictions not found: {predictions_dir}")
+            print("Available models:")
+            for subdir in sorted((batch_dir / "predictions").iterdir()):
+                if subdir.is_dir():
+                    print(f"  - {subdir.name}")
+            return 1
 
     # Clear and recreate output directory
     if output_dir.exists():
@@ -250,6 +281,7 @@ def main():
             prediction_path=pred_file,
             output_path=output_dir,
             sample_index=exported_count,
+            prediction_scale=args.prediction_scale,
         )
 
         if result is not None:
@@ -262,12 +294,15 @@ def main():
 
     # Write metadata file
     metadata_file = output_dir / "metadata.json"
+    metadata_content = {
+        "batchName": args.batch_name,
+        "numSamples": len(metadata),
+        "samples": metadata,
+    }
+    if args.model:
+        metadata_content["modelName"] = args.model
     with open(metadata_file, "w") as f:
-        json.dump({
-            "batchName": args.batch_name,
-            "numSamples": len(metadata),
-            "samples": metadata,
-        }, f, indent=2)
+        json.dump(metadata_content, f, indent=2)
 
     print(f"\nExported {exported_count} samples")
     print(f"Metadata written to {metadata_file}")
