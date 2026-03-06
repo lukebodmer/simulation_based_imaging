@@ -163,10 +163,14 @@ class InverseModelsPage:
         self.state.inv_test_selected_batch = ""
         self.state.inv_test_available_models = []
         self.state.inv_test_selected_model = ""
-        # K-fold fold selection for Test tab
+        # Test tab K-fold and prediction state
         self.state.inv_test_is_kfold = False
-        self.state.inv_test_available_folds = []
-        self.state.inv_test_selected_fold = 0  # 0-indexed fold number
+        self.state.inv_test_k = 0  # Number of folds
+        self.state.inv_test_fold_options = []  # Dropdown options for fold selection
+        self.state.inv_test_selected_fold = ""  # Selected fold (e.g., "1", "2", ...)
+        self.state.inv_test_per_fold_hashes = []  # List of lists: test hashes per fold
+        self.state.inv_test_has_predictions = False  # Whether predictions exist
+        self.state.inv_test_num_predictions = 0  # Number of available predictions
         self.state.inv_is_testing = False
         self.state.inv_test_progress = 0
         self.state.inv_test_message = ""
@@ -213,6 +217,7 @@ class InverseModelsPage:
         # Test tab handlers
         self.state.change("inv_test_selected_batch")(self._on_test_batch_selected)
         self.state.change("inv_test_selected_model")(self._on_test_model_selected)
+        self.state.change("inv_test_selected_fold")(self._on_test_fold_selected)
         self.state.change("inv_selected_test_sim")(self._on_test_sim_selected)
         self.state.change("inv_selected_colormap")(self._on_viz_setting_changed)
         self.state.change("inv_selected_opacity")(self._on_viz_setting_changed)
@@ -237,13 +242,36 @@ class InverseModelsPage:
         logger.info(f"Found {len(batches)} batches for inverse modeling")
 
     def _get_models_for_batch(self, batch_name: str) -> list[dict]:
-        """Get list of available trained models for a batch."""
+        """Get list of available trained models for a batch.
+
+        Handles both regular models and K-fold models:
+        - Regular models: {name}.pkl
+        - K-fold models (new format): {name}.meta.pkl + {name}_fold{N}.pkl files
+        - K-fold models (old format): {name}.pkl with kfold=True inside
+        """
         models_dir = DEFAULT_DATA_DIR / batch_name / "inverse_models"
         models = []
+        seen_names = set()
 
         if models_dir.exists():
             for model_file in sorted(models_dir.glob("*.pkl")):
-                models.append({"title": model_file.stem, "value": model_file.stem})
+                stem = model_file.stem
+
+                # Skip individual fold files (e.g., "model_fold1", "model_fold2")
+                if "_fold" in stem and stem.rsplit("_fold", 1)[-1].isdigit():
+                    continue
+
+                # Handle K-fold metadata files (e.g., "model.meta.pkl")
+                if stem.endswith(".meta"):
+                    base_name = stem[:-5]  # Remove ".meta" suffix
+                    if base_name not in seen_names:
+                        models.append({"title": base_name, "value": base_name})
+                        seen_names.add(base_name)
+                else:
+                    # Regular model file
+                    if stem not in seen_names:
+                        models.append({"title": stem, "value": stem})
+                        seen_names.add(stem)
 
         return models
 
@@ -660,51 +688,63 @@ class InverseModelsPage:
             self._update_view_loss_chart()
             return
 
-        model_path = (
+        model_dir = (
             DEFAULT_DATA_DIR
             / self.state.inv_view_selected_batch
             / "inverse_models"
-            / f"{inv_view_selected_model}.pkl"
         )
 
-        if model_path.exists():
-            try:
+        # Check for K-fold metadata file (new format) or regular model file
+        meta_path = model_dir / f"{inv_view_selected_model}.meta.pkl"
+        model_path = model_dir / f"{inv_view_selected_model}.pkl"
+
+        try:
+            if meta_path.exists():
+                # New K-fold format: load metadata only (fast)
+                with open(meta_path, "rb") as f:
+                    data = pickle.load(f)
+            elif model_path.exists():
+                # Old format or regular model
                 with open(model_path, "rb") as f:
                     data = pickle.load(f)
+            else:
+                logger.warning(f"Model not found: {inv_view_selected_model}")
+                self._update_view_loss_chart()
+                return
 
-                # Extract model info
-                model_info = self._extract_model_info(data)
-                model_info["batch_name"] = self.state.inv_view_selected_batch
-                self.state.inv_view_model_info = model_info
+            # Extract model info
+            model_info = self._extract_model_info(data)
+            model_info["batch_name"] = self.state.inv_view_selected_batch
+            self.state.inv_view_model_info = model_info
 
-                # Load and display training history
-                history = data.get("training_history", {})
-                if history:
-                    # Check if this is K-fold history
-                    if "kfold_epochs" in history:
-                        self._kfold_epochs = history.get("kfold_epochs", [])
-                        self._kfold_train_losses = history.get("kfold_train_losses", [])
-                        self._kfold_test_losses = history.get("kfold_test_losses", [])
-                        self._update_view_loss_chart()
-                        k = len(self._kfold_epochs)
-                        total_epochs = sum(len(e) for e in self._kfold_epochs)
-                        logger.info(
-                            f"View tab: Loaded K-fold history with {k} folds, "
-                            f"{total_epochs} total epochs"
-                        )
-                    else:
-                        # Regular training history
-                        self._loss_epochs = history.get("epochs", [])
-                        self._train_losses = history.get("train_loss", [])
-                        self._test_losses = history.get("test_loss", [])
-                        self._update_view_loss_chart()
-                        logger.info(
-                            f"View tab: Loaded training history with "
-                            f"{len(self._loss_epochs)} epochs"
-                        )
+            # Load and display training history
+            history = data.get("training_history", {})
+            if history:
+                # Check if this is K-fold history
+                if "kfold_epochs" in history:
+                    self._kfold_epochs = history.get("kfold_epochs", [])
+                    self._kfold_train_losses = history.get("kfold_train_losses", [])
+                    self._kfold_test_losses = history.get("kfold_test_losses", [])
+                    self._update_view_loss_chart()
+                    k = len(self._kfold_epochs)
+                    total_epochs = sum(len(e) for e in self._kfold_epochs)
+                    logger.info(
+                        f"View tab: Loaded K-fold history with {k} folds, "
+                        f"{total_epochs} total epochs"
+                    )
+                else:
+                    # Regular training history
+                    self._loss_epochs = history.get("epochs", [])
+                    self._train_losses = history.get("train_loss", [])
+                    self._test_losses = history.get("test_loss", [])
+                    self._update_view_loss_chart()
+                    logger.info(
+                        f"View tab: Loaded training history with "
+                        f"{len(self._loss_epochs)} epochs"
+                    )
 
-            except Exception as e:
-                logger.error(f"Failed to load model info: {e}")
+        except Exception as e:
+            logger.error(f"Failed to load model info: {e}")
 
     def _extract_model_info(self, data: dict) -> dict:
         """Extract model architecture and training info from saved data."""
@@ -918,65 +958,163 @@ class InverseModelsPage:
         )
 
     def _on_test_model_selected(self, inv_test_selected_model, **kwargs):
-        """Handle model selection in test tab - load test simulations."""
+        """Handle model selection in test tab - load available predictions.
+
+        Optimized to avoid loading large model files when possible:
+        - New K-fold format: loads small .meta.pkl file
+        - Old K-fold format: must load full .pkl (unavoidable for backward compat)
+        - Regular models: no need to load file at all, just check predictions
+        """
         self.state.inv_test_simulations = []
         self.state.inv_selected_test_sim = ""
         self.state.inv_test_metrics = {}
         self.state.inv_test_is_kfold = False
-        self.state.inv_test_available_folds = []
-        self.state.inv_test_selected_fold = 0
+        self.state.inv_test_k = 0
+        self.state.inv_test_fold_options = []
+        self.state.inv_test_selected_fold = ""
+        self.state.inv_test_per_fold_hashes = []
+        self.state.inv_test_has_predictions = False
+        self.state.inv_test_num_predictions = 0
 
         if not inv_test_selected_model or not self.state.inv_test_selected_batch:
             return
 
-        model_path = (
+        model_dir = (
             DEFAULT_DATA_DIR
             / self.state.inv_test_selected_batch
             / "inverse_models"
-            / f"{inv_test_selected_model}.pkl"
         )
 
-        if model_path.exists():
-            try:
-                with open(model_path, "rb") as f:
+        # Check for K-fold by looking for metadata file (fast, small file)
+        meta_path = model_dir / f"{inv_test_selected_model}.meta.pkl"
+        model_path = model_dir / f"{inv_test_selected_model}.pkl"
+
+        try:
+            if meta_path.exists():
+                # New K-fold format: load metadata for fold info (small file)
+                with open(meta_path, "rb") as f:
                     data = pickle.load(f)
-
-                # Check if this is a K-fold model and populate fold options
-                is_kfold = data.get("kfold", False)
-                if is_kfold:
-                    models = data.get("models", [])
-                    metrics = data.get("metrics", {})
-                    fold_metrics = metrics.get("fold_metrics", [])
-
-                    self.state.inv_test_is_kfold = True
-                    # Create fold options with test loss info
-                    fold_options = []
-                    for i in range(len(models)):
-                        test_loss = (
-                            fold_metrics[i].get("test_loss", 0)
-                            if i < len(fold_metrics)
-                            else 0
-                        )
-                        fold_options.append(
-                            {
-                                "title": f"Fold {i + 1} (loss: {test_loss:.2f})",
-                                "value": i,
-                            }
-                        )
-                    self.state.inv_test_available_folds = fold_options
-                    self.state.inv_test_selected_fold = 0
-                    logger.info(
-                        f"Test tab: K-fold model with {len(models)} folds detected"
-                    )
-
-                test_hashes = data.get("test_hashes", [])
-                self.state.inv_test_simulations = [
-                    {"title": h[:12] + "...", "value": h} for h in test_hashes
+                self.state.inv_test_is_kfold = True
+                k = data.get("k", 0)
+                self.state.inv_test_k = k
+                self.state.inv_test_per_fold_hashes = data.get(
+                    "per_fold_test_hashes", []
+                )
+                # Create fold options for dropdown
+                self.state.inv_test_fold_options = [
+                    {"title": f"Fold {i + 1}", "value": str(i + 1)} for i in range(k)
                 ]
-                logger.info(f"Test tab: Model has {len(test_hashes)} test simulations")
+                # Default to first fold
+                if k > 0:
+                    self.state.inv_test_selected_fold = "1"
+            elif model_path.exists():
+                # Check if this might be old K-fold format by looking for fold files
+                # Old K-fold models don't have separate fold files, so if we find
+                # {name}_fold1.pkl, it's new format (shouldn't happen since meta
+                # would exist). Otherwise, we need to check the pkl file.
+                #
+                # For performance, we first load predictions. If predictions exist,
+                # we can skip loading the model file entirely for non-K-fold models.
+                # We only need to load the file to check kfold flag and get fold info.
+                #
+                # Heuristic: Check file size. Old K-fold models are huge (GBs).
+                # Regular models are smaller but can still be large.
+                # We'll load lazily only if we need fold info.
+                file_size = model_path.stat().st_size
+                if file_size > 100_000_000:  # > 100MB, likely old K-fold
+                    logger.info(
+                        f"Large model file ({file_size / 1e9:.1f}GB), "
+                        "loading to check K-fold status..."
+                    )
+                    with open(model_path, "rb") as f:
+                        data = pickle.load(f)
+                    self.state.inv_test_is_kfold = data.get("kfold", False)
+                    if self.state.inv_test_is_kfold:
+                        k = data.get("k", 0)
+                        self.state.inv_test_k = k
+                        self.state.inv_test_per_fold_hashes = data.get(
+                            "per_fold_test_hashes", []
+                        )
+                        self.state.inv_test_fold_options = [
+                            {"title": f"Fold {i + 1}", "value": str(i + 1)}
+                            for i in range(k)
+                        ]
+                        if k > 0:
+                            self.state.inv_test_selected_fold = "1"
+                # else: Small file, assume non-K-fold (don't load, just use predictions)
+            else:
+                logger.warning(f"Model not found: {inv_test_selected_model}")
+                return
 
-            except Exception as e:
-                logger.error(f"Failed to load model for testing: {e}")
+            # Load available predictions from the predictions folder
+            self._load_available_predictions(inv_test_selected_model)
+
+        except Exception as e:
+            logger.error(f"Failed to load model for testing: {e}")
+
+    def _load_available_predictions(self, model_name: str):
+        """Load list of available predictions for a model from the predictions folder.
+
+        For K-fold models, filters predictions based on selected fold.
+        """
+        batch_name = self.state.inv_test_selected_batch
+        if not batch_name:
+            return
+
+        predictions_dir = DEFAULT_DATA_DIR / batch_name / "predictions" / model_name
+
+        if predictions_dir.exists():
+            # Get all prediction files
+            all_pred_files = sorted(predictions_dir.glob("*.pkl"))
+            all_pred_hashes = {f.stem for f in all_pred_files}
+
+            # For K-fold models, filter by selected fold
+            if (
+                self.state.inv_test_is_kfold
+                and self.state.inv_test_selected_fold
+                and self.state.inv_test_per_fold_hashes
+            ):
+                fold_idx = int(self.state.inv_test_selected_fold) - 1
+                if 0 <= fold_idx < len(self.state.inv_test_per_fold_hashes):
+                    fold_hashes = set(self.state.inv_test_per_fold_hashes[fold_idx])
+                    # Only show predictions that exist AND belong to this fold
+                    filtered_hashes = fold_hashes & all_pred_hashes
+                    pred_files = [
+                        f for f in all_pred_files if f.stem in filtered_hashes
+                    ]
+                else:
+                    pred_files = all_pred_files
+            else:
+                pred_files = all_pred_files
+
+            self.state.inv_test_simulations = [
+                {"title": f.stem[:12] + "...", "value": f.stem} for f in pred_files
+            ]
+            self.state.inv_test_has_predictions = len(pred_files) > 0
+            self.state.inv_test_num_predictions = len(pred_files)
+            logger.info(
+                f"Test tab: Found {len(pred_files)} predictions for {model_name}"
+                + (
+                    f" (fold {self.state.inv_test_selected_fold})"
+                    if self.state.inv_test_is_kfold
+                    else ""
+                )
+            )
+        else:
+            self.state.inv_test_simulations = []
+            self.state.inv_test_has_predictions = False
+            self.state.inv_test_num_predictions = 0
+            logger.info(f"Test tab: No predictions found for {model_name}")
+
+    def _on_test_fold_selected(self, inv_test_selected_fold, **kwargs):
+        """Handle fold selection in test tab - reload predictions for selected fold."""
+        self.state.inv_selected_test_sim = ""
+
+        if not inv_test_selected_fold or not self.state.inv_test_selected_model:
+            return
+
+        # Reload predictions filtered by the new fold
+        self._load_available_predictions(self.state.inv_test_selected_model)
 
     def _on_test_sim_selected(self, inv_selected_test_sim, **kwargs):
         """Handle test simulation selection - show comparison."""
@@ -1395,7 +1533,13 @@ class InverseModelsPage:
                 self._log(f"Running {k}-fold cross validation")
 
                 result = await self._train_kfold(X, y, sample_ids, model_type, k, loop)
-                models, all_predictions, fold_metrics, all_test_hashes = result
+                (
+                    models,
+                    all_predictions,
+                    fold_metrics,
+                    all_test_hashes,
+                    per_fold_test_hashes,
+                ) = result
 
                 self._training_duration_seconds = (
                     time.time() - self._training_start_time
@@ -1432,7 +1576,12 @@ class InverseModelsPage:
                 await loop.run_in_executor(
                     None,
                     lambda: self._save_kfold_model(
-                        models, all_predictions, all_test_hashes, model_path, metrics
+                        models,
+                        all_predictions,
+                        all_test_hashes,
+                        per_fold_test_hashes,
+                        model_path,
+                        metrics,
                     ),
                 )
 
@@ -1949,7 +2098,7 @@ class InverseModelsPage:
         model_type: str,
         k: int,
         loop: asyncio.AbstractEventLoop,
-    ) -> tuple[list, dict[str, np.ndarray], list[dict], list[str]]:
+    ) -> tuple[list, dict[str, np.ndarray], list[dict], list[str], list[list[str]]]:
         """Train K models using K-fold cross validation.
 
         Args:
@@ -1966,6 +2115,7 @@ class InverseModelsPage:
                 - all_predictions: Dict mapping sample_id to prediction array
                 - fold_metrics: List of metrics dicts for each fold
                 - all_test_hashes: List of all sample IDs (each was tested once)
+                - per_fold_test_hashes: List of lists, test hashes for each fold
         """
         from sklearn.model_selection import KFold
 
@@ -1981,6 +2131,7 @@ class InverseModelsPage:
         all_predictions: dict[str, np.ndarray] = {}
         fold_metrics = []
         all_test_hashes: list[str] = []
+        per_fold_test_hashes: list[list[str]] = []
 
         for fold_idx, (train_idx, test_idx) in enumerate(kf.split(X)):
             self._current_fold = fold_idx
@@ -2057,18 +2208,27 @@ class InverseModelsPage:
             fold_metrics.append(metrics)
 
             # Generate predictions for test samples in this fold
+            fold_test_hashes = []
             for i, sample_id in enumerate(test_ids):
                 X_single = X_test[i : i + 1]
                 pred = model.predict(X_single)
                 all_predictions[sample_id] = pred.ravel()
                 all_test_hashes.append(sample_id)
+                fold_test_hashes.append(sample_id)
+            per_fold_test_hashes.append(fold_test_hashes)
 
             self._log(
                 f"Fold {fold_idx + 1}: Train={metrics['train_loss']:.6f}, "
                 f"Test={metrics['test_loss']:.6f}"
             )
 
-        return models, all_predictions, fold_metrics, all_test_hashes
+        return (
+            models,
+            all_predictions,
+            fold_metrics,
+            all_test_hashes,
+            per_fold_test_hashes,
+        )
 
     def _train_single_fold(
         self,
@@ -2157,21 +2317,33 @@ class InverseModelsPage:
         models: list,
         all_predictions: dict[str, np.ndarray],
         all_test_hashes: list[str],
+        per_fold_test_hashes: list[list[str]],
         path: Path,
         metrics: dict,
     ):
-        """Save K-fold trained models with predictions and metadata."""
-        data = {
-            "models": models,  # List of K models
+        """Save K-fold trained models with predictions and metadata.
+
+        Saves each fold's model in a separate file for fast loading:
+        - {model_name}_fold1.pkl, {model_name}_fold2.pkl, ... (individual models)
+        - {model_name}.meta.pkl (metadata only, small file for quick K-fold detection)
+
+        Predictions are saved to predictions/{model_name}/ directory.
+        """
+        k = int(self.state.inv_kfold_k)
+        model_name = path.stem  # e.g., "my_kfold_model"
+        model_dir = path.parent  # e.g., data/batch/inverse_models/
+
+        # Shared metadata (small, fast to load)
+        metadata = {
+            "kfold": True,
+            "k": k,
             "model_type": self.state.inv_model_type,
             "model_name": self.state.inv_model_name.strip()
             if self.state.inv_model_name
             else None,
-            "test_hashes": all_test_hashes,  # All samples (each tested once)
-            "predictions": all_predictions,  # Dict: sample_id -> prediction
+            "test_hashes": all_test_hashes,
+            "per_fold_test_hashes": per_fold_test_hashes,
             "metrics": metrics,
-            "kfold": True,
-            "k": int(self.state.inv_kfold_k),
             "training_config": {
                 "epochs": int(self.state.inv_epochs),
                 "batch_size": int(self.state.inv_batch_size),
@@ -2180,7 +2352,7 @@ class InverseModelsPage:
                 "early_stopping": bool(self.state.inv_early_stopping),
                 "early_stopping_patience": int(self.state.inv_early_stopping_patience),
                 "kfold": True,
-                "k": int(self.state.inv_kfold_k),
+                "k": k,
             },
             "architecture_config": {
                 "mlp_hidden_layers": self._parse_hidden_layers(
@@ -2218,12 +2390,25 @@ class InverseModelsPage:
             },
         }
 
-        with open(path, "wb") as f:
-            pickle.dump(data, f)
+        # Save metadata file (small, for quick K-fold detection)
+        meta_path = model_dir / f"{model_name}.meta.pkl"
+        with open(meta_path, "wb") as f:
+            pickle.dump(metadata, f)
 
-        # Also save predictions to the predictions directory
+        # Save each fold's model separately
+        for fold_idx, model in enumerate(models):
+            fold_path = model_dir / f"{model_name}_fold{fold_idx + 1}.pkl"
+            fold_data = {
+                "model": model,
+                "fold": fold_idx + 1,
+                "test_hashes": per_fold_test_hashes[fold_idx],
+            }
+            with open(fold_path, "wb") as f:
+                pickle.dump(fold_data, f)
+
+        # Save predictions to the predictions directory
         batch_name = self.state.inv_selected_batch
-        predictions_dir = DEFAULT_DATA_DIR / batch_name / "predictions" / path.stem
+        predictions_dir = DEFAULT_DATA_DIR / batch_name / "predictions" / model_name
         predictions_dir.mkdir(parents=True, exist_ok=True)
 
         for sample_id, prediction in all_predictions.items():
@@ -2313,27 +2498,16 @@ class InverseModelsPage:
             with open(model_path, "rb") as f:
                 data = pickle.load(f)
 
-            # Handle K-fold models: extract the selected fold's model
+            # K-fold models should not use Run Tests - predictions are made during training
             is_kfold = data.get("kfold", False)
             if is_kfold:
-                models = data.get("models", [])
-                selected_fold = int(self.state.inv_test_selected_fold)
-                if selected_fold < len(models):
-                    model = models[selected_fold]
-                    logger.info(f"Using K-fold model from fold {selected_fold + 1}")
-                else:
-                    logger.error(f"Invalid fold index {selected_fold}")
-                    self.state.inv_test_message = "Error: Invalid fold selection"
-                    return
-                # For K-fold, save predictions in a fold-specific subfolder
-                predictions_dir = (
-                    batch_dir / "predictions" / f"{model_name}_fold{selected_fold + 1}"
+                self.state.inv_test_message = (
+                    "K-fold predictions are generated during training"
                 )
-            else:
-                model = data.get("model")
-                # Save predictions in a subfolder named after the model
-                predictions_dir = batch_dir / "predictions" / model_name
+                return
 
+            model = data.get("model")
+            predictions_dir = batch_dir / "predictions" / model_name
             predictions_dir.mkdir(parents=True, exist_ok=True)
 
             if model is None:
@@ -2342,6 +2516,7 @@ class InverseModelsPage:
                 return
 
             test_hashes = data.get("test_hashes", [])
+
             preprocessing_config = data.get("preprocessing_config", {})
 
             # Extract preprocessing parameters (use defaults if not saved)
@@ -2413,8 +2588,8 @@ class InverseModelsPage:
             self.state.inv_test_progress = 100
             self.state.inv_test_message = "Testing complete!"
 
-            # Refresh test simulations list to show predictions
-            self._on_test_model_selected(model_name)
+            # Refresh predictions list to show new predictions
+            self._load_available_predictions(model_name)
 
         except Exception as e:
             logger.exception("Testing failed")
@@ -3243,8 +3418,8 @@ class InverseModelsPage:
 
     def _build_test_tab(self):
         """Build the Test tab content."""
-        # Top section: Model selection and test controls
-        with v3.VRow():
+        # Top section: Model selection
+        with v3.VRow(dense=True, align="center"):
             # Batch selection
             with v3.VCol(cols=12, md=3):
                 with v3.VRow(align="center", dense=True):
@@ -3265,7 +3440,7 @@ class InverseModelsPage:
                         )
 
             # Model selection
-            with v3.VCol(cols=12, md=2):
+            with v3.VCol(cols=12, md=3):
                 v3.VSelect(
                     v_model=("inv_test_selected_model",),
                     items=("inv_test_available_models",),
@@ -3275,35 +3450,54 @@ class InverseModelsPage:
                     disabled=("!inv_test_selected_batch",),
                 )
 
-            # Fold selection (only visible for K-fold models)
-            with v3.VCol(cols=12, md=1, v_if=("inv_test_is_kfold",)):
+            # Fold selection (only for K-fold models)
+            with v3.VCol(cols=12, md=2, v_if=("inv_test_is_kfold",)):
                 v3.VSelect(
                     v_model=("inv_test_selected_fold",),
-                    items=("inv_test_available_folds",),
+                    items=("inv_test_fold_options",),
                     label="Fold",
                     density="compact",
                 )
 
-            # Test button and progress
+            # Test result selection
             with v3.VCol(cols=12, md=3):
+                v3.VSelect(
+                    v_model=("inv_selected_test_sim",),
+                    items=("inv_test_simulations",),
+                    label="View Prediction",
+                    density="compact",
+                    clearable=True,
+                    disabled=("inv_test_simulations.length === 0",),
+                    hint=("inv_test_num_predictions + ' predictions available'",),
+                    persistent_hint=True,
+                )
+
+        # Run Tests section (only for non-K-fold models without predictions)
+        with v3.VRow(
+            dense=True,
+            classes="mt-2",
+            v_if=(
+                "!inv_test_is_kfold && inv_test_selected_model && !inv_test_has_predictions",
+            ),
+        ):
+            with v3.VCol(cols=12, md=4):
                 v3.VBtn(
                     "Run Tests",
                     color="primary",
                     block=True,
-                    disabled=(
-                        "inv_is_testing || !inv_test_selected_model || !inv_test_selected_batch",
-                    ),
+                    disabled=("inv_is_testing",),
                     click=self._start_testing,
                 )
 
+        # Progress and messages
+        with v3.VRow(dense=True, v_if=("inv_is_testing || inv_test_message",)):
+            with v3.VCol(cols=12, md=6):
                 v3.VProgressLinear(
                     v_if=("inv_is_testing",),
                     model_value=("inv_test_progress",),
                     color="primary",
                     height=8,
-                    classes="mt-2",
                 )
-
                 v3.VAlert(
                     v_if=("inv_test_message",),
                     text=("inv_test_message",),
@@ -3312,15 +3506,18 @@ class InverseModelsPage:
                     classes="mt-2",
                 )
 
-            # Test simulation selection
-            with v3.VCol(cols=12, md=3):
-                v3.VSelect(
-                    v_model=("inv_selected_test_sim",),
-                    items=("inv_test_simulations",),
-                    label="View Test Result",
+        # Info message for K-fold models
+        with v3.VRow(
+            dense=True,
+            classes="mt-2",
+            v_if=("inv_test_is_kfold && inv_test_has_predictions",),
+        ):
+            with v3.VCol(cols=12):
+                v3.VAlert(
+                    text="Predictions were generated during K-fold training. Select a prediction to view.",
+                    type="success",
                     density="compact",
-                    clearable=True,
-                    disabled=("inv_test_simulations.length === 0",),
+                    variant="tonal",
                 )
 
         # Bottom section: Comparison visualization
