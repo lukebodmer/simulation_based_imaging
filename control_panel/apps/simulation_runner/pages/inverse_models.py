@@ -50,7 +50,8 @@ OPACITY_PRESETS = [
 ]
 
 MODEL_TYPES = [
-    {"title": "Neural Network (CNN)", "value": "nn_cnn"},
+    {"title": "Neural Network (1D CNN)", "value": "nn_cnn"},
+    {"title": "Neural Network (2D CNN)", "value": "nn_cnn2d"},
     {"title": "Neural Network (MLP)", "value": "nn_mlp"},
     {"title": "Gaussian Process", "value": "gp"},
 ]
@@ -87,7 +88,10 @@ class InverseModelsPage:
         self.state.inv_epochs = 500
         self.state.inv_batch_size = 16
         self.state.inv_learning_rate = 0.0001
-        self.state.inv_kspace_grid_size = 64  # K-space resolution (grid_size^3 voxels)
+        self.state.inv_voxel_grid_size = (
+            64  # Voxel grid resolution (grid_size^3 voxels)
+        )
+        self.state.inv_use_kspace = True  # Use k-space representation (FFT of voxels)
         self.state.inv_trim_timesteps = 45  # Skip this many initial timesteps
         self.state.inv_downsample_factor = 2  # Downsample sensor data by this factor
 
@@ -95,11 +99,20 @@ class InverseModelsPage:
         self.state.inv_mlp_hidden_layers = "4096, 2048, 1024"  # Comma-separated sizes
         self.state.inv_mlp_dropout = 0.2
 
-        # CNN architecture configuration
+        # CNN architecture configuration (shared by 1D and 2D CNN)
         self.state.inv_cnn_conv_channels = "32, 64"  # Comma-separated channel sizes
         self.state.inv_cnn_pool_size = 16
         self.state.inv_cnn_regressor_hidden = 512
         self.state.inv_cnn_dropout = 0.2
+        self.state.inv_cnn_use_residual = True  # Use residual blocks after conv layers
+
+        # 2D CNN specific configuration
+        self.state.inv_cnn2d_pool_height = 12  # Preserve sensor resolution
+        self.state.inv_cnn2d_pool_width = 8
+        self.state.inv_cnn2d_kernel_height = 3  # Small sensor kernel
+        self.state.inv_cnn2d_kernel_width = 11  # Wide time kernel for wave patterns
+        self.state.inv_cnn2d_stride_height = 1  # Preserve sensor resolution
+        self.state.inv_cnn2d_stride_width = 2  # Downsample time
 
         # Training options
         self.state.inv_early_stopping = False
@@ -119,6 +132,21 @@ class InverseModelsPage:
         self.state.inv_use_noise = False
         self.state.inv_noise_level = 0.05  # 5% of global peak by default
 
+        # Sensor selection settings
+        self.state.inv_active_sensor_count = 0  # Updated when batch loaded
+        self.state.inv_total_sensor_count = 0  # Total sensors in batch
+        self.state.inv_sensor_active_list = []  # List of booleans for UI binding
+        self.state.inv_sensors_by_face = []  # List of {face, label, sensors: [{idx, active}]}
+        self.state.inv_sensor_grid = []  # Grid layout matching unfolded cube for UI
+        self.state.inv_sensor_grid_size = (
+            0  # Number of sensors per row/col on each face
+        )
+        self.state.inv_sensor_sync_faces = False  # Apply changes to all faces at once
+        self._sensor_locations = None  # Cached sensor locations (num_sensors, 3)
+        self._sensor_face_indices = {}  # Maps face name -> list of sensor indices
+        self._sensor_grid_map = {}  # Maps (face, row, col) -> sensor index
+        self.sensor_cube_widget = None  # Matplotlib widget for cube visualization
+
         # Training state
         self.state.inv_is_training = False
         self.state.inv_training_progress = 0
@@ -137,9 +165,13 @@ class InverseModelsPage:
         self._current_fold = 0
         self.loss_chart_widget = None
         self.view_loss_chart_widget = None
+        self.view_network_arch_widget = None
 
         # Compression preview
         self.compression_preview_widget = None
+
+        # Network architecture visualization
+        self.network_arch_widget = None
         self._sample_sensor_data = None  # Current sensor channel for preview
         self._all_sensor_data = []  # List of (sim_name, sensor_data) tuples
         self._current_sensor_index = 0  # Current index in _all_sensor_data
@@ -171,6 +203,7 @@ class InverseModelsPage:
         self.state.inv_test_per_fold_hashes = []  # List of lists: test hashes per fold
         self.state.inv_test_has_predictions = False  # Whether predictions exist
         self.state.inv_test_num_predictions = 0  # Number of available predictions
+        self._test_model_use_kspace = True  # Whether current model uses k-space output
         self.state.inv_is_testing = False
         self.state.inv_test_progress = 0
         self.state.inv_test_message = ""
@@ -210,7 +243,8 @@ class InverseModelsPage:
         self.state.change("inv_noise_level")(self._on_compression_setting_changed)
         self.state.change("inv_trim_timesteps")(self._on_input_output_changed)
         self.state.change("inv_downsample_factor")(self._on_input_output_changed)
-        self.state.change("inv_kspace_grid_size")(self._on_input_output_changed)
+        self.state.change("inv_voxel_grid_size")(self._on_input_output_changed)
+        self.state.change("inv_use_kspace")(self._on_input_output_changed)
         # View tab handlers
         self.state.change("inv_view_selected_batch")(self._on_view_batch_selected)
         self.state.change("inv_view_selected_model")(self._on_view_model_selected)
@@ -288,6 +322,17 @@ class InverseModelsPage:
         self.state.inv_downsample_hint = "Select batch to see timesteps"
         self.state.inv_input_size = 0
         self.state.inv_output_size = 0
+
+        # Reset sensor selection state
+        self._sensor_locations = None
+        self._sensor_face_indices = {}
+        self._sensor_grid_map = {}
+        self.state.inv_sensor_active_list = []
+        self.state.inv_sensors_by_face = []
+        self.state.inv_sensor_grid = []
+        self.state.inv_sensor_grid_size = 0
+        self.state.inv_total_sensor_count = 0
+        self.state.inv_active_sensor_count = 0
 
         if not inv_selected_batch:
             self.state.inv_compression_preview_label = ""
@@ -370,7 +415,26 @@ class InverseModelsPage:
                 f"global max: {self._global_sensor_max:.4g}"
             )
 
+        # Load sensor locations and classify by face
+        batch_path = DEFAULT_DATA_DIR / inv_selected_batch
+        self._sensor_locations = self._load_sensor_locations(batch_path)
+        if self._sensor_locations is not None:
+            self._sensor_face_indices = self._classify_sensors_by_face(
+                self._sensor_locations
+            )
+            self.state.inv_total_sensor_count = len(self._sensor_locations)
+            # Initialize all sensors as active (use list for Vuetify binding)
+            self.state.inv_sensor_active_list = [True] * len(self._sensor_locations)
+            # Build grid map for UI
+            self._build_sensor_grid_map()
+            self._update_active_sensor_count()
+            logger.info(
+                f"Loaded {len(self._sensor_locations)} sensor locations, "
+                f"classified into {len(self._sensor_face_indices)} faces"
+            )
+
         self._update_compression_preview()
+        self._update_sensor_cube_visualization()
 
     def _on_compression_setting_changed(self, **kwargs):
         """Handle changes to compression settings - update preview."""
@@ -383,7 +447,11 @@ class InverseModelsPage:
     def _update_input_output_sizes(self):
         """Update the input/output size calculations and hints."""
         raw = self.state.inv_raw_timesteps
-        num_sensors = self.state.inv_num_sensors
+        # Use active sensor count if available, otherwise fall back to total
+        if self.state.inv_active_sensor_count > 0:
+            num_sensors = self.state.inv_active_sensor_count
+        else:
+            num_sensors = self.state.inv_num_sensors
 
         if raw > 0 and num_sensors > 0:
             trim = int(self.state.inv_trim_timesteps)
@@ -401,10 +469,15 @@ class InverseModelsPage:
             self.state.inv_downsample_hint = "Select batch to see timesteps"
             self.state.inv_input_size = 0
 
-        # Calculate output size: grid_size^3 * 2 (real + imaginary)
+        # Calculate output size based on k-space or voxel mode
+        # K-space: grid_size^3 * 2 (real + imaginary parts)
+        # Voxels: grid_size^3 (density values only)
         try:
-            grid_size = int(self.state.inv_kspace_grid_size)
-            self.state.inv_output_size = grid_size**3 * 2
+            grid_size = int(self.state.inv_voxel_grid_size)
+            if self.state.inv_use_kspace:
+                self.state.inv_output_size = grid_size**3 * 2
+            else:
+                self.state.inv_output_size = grid_size**3
         except (ValueError, TypeError):
             self.state.inv_output_size = 0
 
@@ -435,6 +508,493 @@ class InverseModelsPage:
             f"{label} ({self._current_sensor_index + 1}/{len(self._all_sensor_data)})"
         )
         self._update_compression_preview()
+
+    def _classify_sensors_by_face(self, locations: np.ndarray) -> dict[str, list[int]]:
+        """Classify sensors into faces based on their locations.
+
+        Sensors are placed on the boundary of a unit cube [0, 1]^3.
+        We classify based on which coordinate is at the boundary (0 or 1).
+
+        Args:
+            locations: Array of shape (num_sensors, 3) with sensor coordinates.
+
+        Returns:
+            Dictionary mapping face names to lists of sensor indices.
+        """
+        tolerance = 0.05  # Tolerance for boundary detection
+
+        face_indices = {
+            "x_neg": [],
+            "x_pos": [],
+            "y_neg": [],
+            "y_pos": [],
+            "z_neg": [],
+            "z_pos": [],
+        }
+
+        for i, (x, y, z) in enumerate(locations):
+            if x < tolerance:
+                face_indices["x_neg"].append(i)
+            elif x > 1.0 - tolerance:
+                face_indices["x_pos"].append(i)
+            elif y < tolerance:
+                face_indices["y_neg"].append(i)
+            elif y > 1.0 - tolerance:
+                face_indices["y_pos"].append(i)
+            elif z < tolerance:
+                face_indices["z_neg"].append(i)
+            elif z > 1.0 - tolerance:
+                face_indices["z_pos"].append(i)
+
+        return face_indices
+
+    def _load_sensor_locations(self, batch_dir: Path) -> np.ndarray | None:
+        """Load sensor locations from the first simulation in a batch.
+
+        Args:
+            batch_dir: Path to the batch directory.
+
+        Returns:
+            Array of shape (num_sensors, 3) with sensor coordinates, or None.
+        """
+        sims_dir = batch_dir / "simulations"
+        if not sims_dir.exists():
+            return None
+
+        # Get first simulation
+        sim_dirs = sorted([d for d in sims_dir.iterdir() if d.is_dir()])
+        if not sim_dirs:
+            return None
+
+        sensor_file = sim_dirs[0] / "sensor_data.pkl"
+        if not sensor_file.exists():
+            return None
+
+        try:
+            with open(sensor_file, "rb") as f:
+                data = pickle.load(f)
+
+            if isinstance(data, dict) and "locations" in data:
+                return data["locations"]
+        except Exception as e:
+            logger.error(f"Failed to load sensor locations: {e}")
+
+        return None
+
+    def _get_active_sensor_indices(self) -> list[int]:
+        """Get list of sensor indices that are currently active.
+
+        Returns:
+            Sorted list of active sensor indices.
+        """
+        sensor_list = self.state.inv_sensor_active_list
+        if not sensor_list:
+            return []
+
+        return [i for i, active in enumerate(sensor_list) if active]
+
+    def _get_num_active_sensors(self) -> int:
+        """Get the number of active sensors.
+
+        Returns:
+            Number of active sensors.
+        """
+        return len(self._get_active_sensor_indices())
+
+    def _update_active_sensor_count(self):
+        """Update the active sensor count based on individual sensor selection."""
+        active_indices = self._get_active_sensor_indices()
+        self.state.inv_active_sensor_count = len(active_indices)
+        self._update_sensors_by_face()
+        self._update_sensor_grid()
+        self._update_sensor_cube_visualization()
+        self._update_input_output_sizes()
+
+    def _update_sensors_by_face(self):
+        """Update the sensors-by-face structure for UI display.
+
+        Sensors are sorted by their grid position (row-major order) to match
+        the visualization.
+        """
+        face_labels = {
+            "x_neg": "X- Face",
+            "x_pos": "X+ Face",
+            "y_neg": "Y- Face",
+            "y_pos": "Y+ Face",
+            "z_neg": "Z- Face",
+            "z_pos": "Z+ Face",
+        }
+        face_order = ["x_neg", "x_pos", "y_neg", "y_pos", "z_neg", "z_pos"]
+
+        sensor_list = self.state.inv_sensor_active_list
+        grid_size = self.state.inv_sensor_grid_size
+        result = []
+
+        for face_name in face_order:
+            if face_name not in self._sensor_face_indices:
+                continue
+            indices = self._sensor_face_indices[face_name]
+            if not indices:
+                continue
+
+            # Sort sensors by grid position (row, col) to match visualization
+            if self._sensor_locations is not None and grid_size > 0:
+                locs = self._sensor_locations[indices]
+
+                # Project 3D coords to 2D based on face
+                if face_name in ("x_neg", "x_pos"):
+                    u, v = locs[:, 1], locs[:, 2]
+                elif face_name in ("y_neg", "y_pos"):
+                    u, v = locs[:, 0], locs[:, 2]
+                else:  # z_neg, z_pos
+                    u, v = locs[:, 0], locs[:, 1]
+
+                # Compute grid positions and sort by (row, col)
+                sensor_positions = []
+                for i, idx in enumerate(indices):
+                    col = int(np.clip(u[i] * grid_size, 0, grid_size - 1))
+                    row = int(np.clip((1 - v[i]) * grid_size, 0, grid_size - 1))
+                    sensor_positions.append((row, col, idx))
+
+                # Sort by row then column (row-major order)
+                sensor_positions.sort(key=lambda x: (x[0], x[1]))
+                sorted_indices = [sp[2] for sp in sensor_positions]
+            else:
+                sorted_indices = sorted(indices)
+
+            sensors = []
+            for idx in sorted_indices:
+                active = sensor_list[idx] if idx < len(sensor_list) else True
+                sensors.append({"idx": idx, "active": active})
+
+            result.append(
+                {
+                    "face": face_name,
+                    "label": face_labels.get(face_name, face_name),
+                    "sensors": sensors,
+                }
+            )
+
+        self.state.inv_sensors_by_face = result
+
+    def _build_sensor_grid_map(self):
+        """Build mapping from (face, row, col) to sensor index.
+
+        Assumes sensors on each face form a square grid.
+        """
+        self._sensor_grid_map = {}
+
+        if self._sensor_locations is None or not self._sensor_face_indices:
+            self.state.inv_sensor_grid_size = 0
+            return
+
+        # Determine grid size from first face with sensors
+        for face_name, indices in self._sensor_face_indices.items():
+            if indices:
+                grid_size = int(np.sqrt(len(indices)))
+                self.state.inv_sensor_grid_size = grid_size
+                break
+        else:
+            self.state.inv_sensor_grid_size = 0
+            return
+
+        grid_size = self.state.inv_sensor_grid_size
+
+        for face_name, indices in self._sensor_face_indices.items():
+            if not indices:
+                continue
+
+            locs = self._sensor_locations[indices]
+
+            # Project 3D coords to 2D based on face
+            if face_name in ("x_neg", "x_pos"):
+                u, v = locs[:, 1], locs[:, 2]
+            elif face_name in ("y_neg", "y_pos"):
+                u, v = locs[:, 0], locs[:, 2]
+            else:  # z_neg, z_pos
+                u, v = locs[:, 0], locs[:, 1]
+
+            # Map each sensor to grid position
+            for i, idx in enumerate(indices):
+                # Convert normalized coords to grid row/col
+                col = int(np.clip(u[i] * grid_size, 0, grid_size - 1))
+                row = int(
+                    np.clip((1 - v[i]) * grid_size, 0, grid_size - 1)
+                )  # Flip v for top-to-bottom
+                self._sensor_grid_map[(face_name, row, col)] = idx
+
+    def _update_sensor_grid(self):
+        """Update the sensor grid structure for UI display.
+
+        Creates a grid layout matching the unfolded cube pattern:
+                 [z_pos]
+        [x_neg] [y_neg] [x_pos] [y_pos]
+                 [z_neg]
+        """
+        sensor_list = self.state.inv_sensor_active_list
+        grid_size = self.state.inv_sensor_grid_size
+
+        if grid_size == 0 or not sensor_list:
+            self.state.inv_sensor_grid = []
+            return
+
+        # The unfolded cube grid is 4 faces wide x 3 faces tall
+        # Each face is grid_size x grid_size
+        # Layout (face positions in the 4x3 grid of faces):
+        #   Row 0:    -    z_pos    -      -
+        #   Row 1: x_neg  y_neg  x_pos  y_pos
+        #   Row 2:    -    z_neg    -      -
+
+        face_grid_positions = {
+            "z_pos": (0, 1),  # (face_row, face_col)
+            "x_neg": (1, 0),
+            "y_neg": (1, 1),
+            "x_pos": (1, 2),
+            "y_pos": (1, 3),
+            "z_neg": (2, 1),
+        }
+
+        total_rows = 3 * grid_size
+        total_cols = 4 * grid_size
+
+        grid = []
+        for row in range(total_rows):
+            grid_row = []
+            for col in range(total_cols):
+                # Determine which face this cell belongs to
+                face_row = row // grid_size
+                face_col = col // grid_size
+                local_row = row % grid_size
+                local_col = col % grid_size
+
+                # Find face at this position
+                face_name = None
+                for fname, (fr, fc) in face_grid_positions.items():
+                    if fr == face_row and fc == face_col:
+                        face_name = fname
+                        break
+
+                if face_name is None:
+                    # Empty cell (not part of any face)
+                    grid_row.append({"empty": True})
+                else:
+                    # Get sensor index for this grid position
+                    idx = self._sensor_grid_map.get((face_name, local_row, local_col))
+                    if idx is not None:
+                        active = sensor_list[idx] if idx < len(sensor_list) else True
+                        grid_row.append({"idx": idx, "active": active, "empty": False})
+                    else:
+                        grid_row.append({"empty": True})
+
+            grid.append(grid_row)
+
+        self.state.inv_sensor_grid = grid
+
+    def _select_all_sensors(self):
+        """Select all sensors."""
+        n = len(self.state.inv_sensor_active_list)
+        if n > 0:
+            self.state.inv_sensor_active_list = [True] * n
+            self._update_active_sensor_count()
+
+    def _deselect_all_sensors(self):
+        """Deselect all sensors."""
+        n = len(self.state.inv_sensor_active_list)
+        if n > 0:
+            self.state.inv_sensor_active_list = [False] * n
+            self._update_active_sensor_count()
+
+    def _toggle_sensor(self, idx):
+        """Toggle a single sensor on/off.
+
+        If sync_faces mode is enabled, also toggles corresponding sensors
+        on other faces (sensors at the same relative position).
+        """
+        sensor_list = list(self.state.inv_sensor_active_list)
+        if not (0 <= idx < len(sensor_list)):
+            return
+
+        new_state = not sensor_list[idx]
+
+        if self.state.inv_sensor_sync_faces:
+            # Find corresponding sensors on all faces and toggle them together
+            corresponding = self._get_corresponding_sensors(idx)
+            for sensor_idx in corresponding:
+                if 0 <= sensor_idx < len(sensor_list):
+                    sensor_list[sensor_idx] = new_state
+        else:
+            sensor_list[idx] = new_state
+
+        self.state.inv_sensor_active_list = sensor_list
+        self._update_active_sensor_count()
+
+    def _get_corresponding_sensors(self, idx: int) -> list[int]:
+        """Get sensors at the same relative position across all faces.
+
+        Args:
+            idx: Index of the sensor to find correspondences for.
+
+        Returns:
+            List of sensor indices (including the input idx) that are at
+            corresponding positions on their respective faces.
+        """
+        if self._sensor_locations is None or not self._sensor_face_indices:
+            return [idx]
+
+        # Find which face this sensor belongs to and its position within face
+        sensor_face = None
+        for face_name, indices in self._sensor_face_indices.items():
+            if idx in indices:
+                sensor_face = face_name
+                break
+
+        if sensor_face is None:
+            return [idx]
+
+        # Get the position index within the face (sorted order)
+        face_indices = sorted(self._sensor_face_indices[sensor_face])
+        try:
+            position_in_face = face_indices.index(idx)
+        except ValueError:
+            return [idx]
+
+        # Find sensors at the same position index on all other faces
+        corresponding = []
+        for face_name, indices in self._sensor_face_indices.items():
+            sorted_indices = sorted(indices)
+            if position_in_face < len(sorted_indices):
+                corresponding.append(sorted_indices[position_in_face])
+
+        return corresponding
+
+    def _get_sensor_2d_positions(self) -> dict[int, tuple[float, float]]:
+        """Compute 2D positions for all sensors on the unfolded cube.
+
+        Returns:
+            Dict mapping sensor index to (x, y) position on the unfolded cube.
+        """
+        face_positions = {
+            "z_pos": (1, 2),
+            "x_neg": (0, 1),
+            "y_neg": (1, 1),
+            "x_pos": (2, 1),
+            "y_pos": (3, 1),
+            "z_neg": (1, 0),
+        }
+
+        positions = {}
+        if self._sensor_locations is None or not self._sensor_face_indices:
+            return positions
+
+        for face_name, (gx, gy) in face_positions.items():
+            if face_name not in self._sensor_face_indices:
+                continue
+
+            sensor_indices = self._sensor_face_indices[face_name]
+            if len(sensor_indices) == 0:
+                continue
+
+            locs = self._sensor_locations[sensor_indices]
+
+            # Project 3D coords to 2D based on face
+            if face_name in ("x_neg", "x_pos"):
+                u, v = locs[:, 1], locs[:, 2]
+            elif face_name in ("y_neg", "y_pos"):
+                u, v = locs[:, 0], locs[:, 2]
+            else:  # z_neg, z_pos
+                u, v = locs[:, 0], locs[:, 1]
+
+            # Scale and offset to face position
+            for i, idx in enumerate(sensor_indices):
+                positions[idx] = (gx + u[i] * 0.8 + 0.1, gy + v[i] * 0.8 + 0.1)
+
+        return positions
+
+    def _update_sensor_cube_visualization(self):
+        """Update the unfolded cube visualization showing active/inactive sensors."""
+        if self.sensor_cube_widget is None:
+            return
+
+        fig, ax = plt.subplots(figsize=(4, 3))
+        ax.set_aspect("equal")
+        ax.axis("off")
+
+        # Unfolded cube layout (cross pattern):
+        #       [z_pos]
+        # [x_neg][y_neg][x_pos][y_pos]
+        #       [z_neg]
+
+        face_positions = {
+            "z_pos": (1, 2),
+            "x_neg": (0, 1),
+            "y_neg": (1, 1),
+            "x_pos": (2, 1),
+            "y_pos": (3, 1),
+            "z_neg": (1, 0),
+        }
+
+        face_labels = {
+            "x_neg": "X-",
+            "x_pos": "X+",
+            "y_neg": "Y-",
+            "y_pos": "Y+",
+            "z_neg": "Z-",
+            "z_pos": "Z+",
+        }
+
+        from matplotlib.patches import Rectangle
+
+        # Draw face rectangles with neutral background
+        for face_name, (gx, gy) in face_positions.items():
+            rect = Rectangle(
+                (gx, gy),
+                1,
+                1,
+                facecolor="#E0E0E0",
+                edgecolor="#9E9E9E",
+                linewidth=1.5,
+                alpha=0.8,
+            )
+            ax.add_patch(rect)
+
+            # Add face label (subtle, in corner)
+            ax.text(
+                gx + 0.08,
+                gy + 0.92,
+                face_labels[face_name],
+                ha="left",
+                va="top",
+                fontsize=8,
+                fontweight="bold",
+                color="#757575",
+            )
+
+        # Draw sensor dots with individual active/inactive states
+        if self._sensor_locations is not None and self._sensor_face_indices:
+            positions = self._get_sensor_2d_positions()
+            sensor_list = self.state.inv_sensor_active_list
+
+            for idx, (sx, sy) in positions.items():
+                is_active = sensor_list[idx] if idx < len(sensor_list) else True
+                dot_color = "#4CAF50" if is_active else "#BDBDBD"
+                edge_color = "#2E7D32" if is_active else "#9E9E9E"
+
+                ax.scatter(
+                    sx,
+                    sy,
+                    c=dot_color,
+                    s=25,
+                    alpha=0.9,
+                    edgecolors=edge_color,
+                    linewidths=0.5,
+                )
+
+        ax.set_xlim(-0.1, 4.1)
+        ax.set_ylim(-0.1, 3.1)
+
+        fig.tight_layout(pad=0.1)
+        self.sensor_cube_widget.update(fig)
+        plt.close(fig)
 
     def _update_compression_preview(self):
         """Update the compression/normalization/noise preview chart."""
@@ -686,12 +1246,11 @@ class InverseModelsPage:
 
         if not inv_view_selected_model or not self.state.inv_view_selected_batch:
             self._update_view_loss_chart()
+            self._update_view_network_arch_visualization()
             return
 
         model_dir = (
-            DEFAULT_DATA_DIR
-            / self.state.inv_view_selected_batch
-            / "inverse_models"
+            DEFAULT_DATA_DIR / self.state.inv_view_selected_batch / "inverse_models"
         )
 
         # Check for K-fold metadata file (new format) or regular model file
@@ -710,6 +1269,7 @@ class InverseModelsPage:
             else:
                 logger.warning(f"Model not found: {inv_view_selected_model}")
                 self._update_view_loss_chart()
+                self._update_view_network_arch_visualization()
                 return
 
             # Extract model info
@@ -726,6 +1286,7 @@ class InverseModelsPage:
                     self._kfold_train_losses = history.get("kfold_train_losses", [])
                     self._kfold_test_losses = history.get("kfold_test_losses", [])
                     self._update_view_loss_chart()
+                    self._update_view_network_arch_visualization()
                     k = len(self._kfold_epochs)
                     total_epochs = sum(len(e) for e in self._kfold_epochs)
                     logger.info(
@@ -738,6 +1299,7 @@ class InverseModelsPage:
                     self._train_losses = history.get("train_loss", [])
                     self._test_losses = history.get("test_loss", [])
                     self._update_view_loss_chart()
+                    self._update_view_network_arch_visualization()
                     logger.info(
                         f"View tab: Loaded training history with "
                         f"{len(self._loss_epochs)} epochs"
@@ -772,6 +1334,7 @@ class InverseModelsPage:
             "num_test_samples": len(test_hashes),
             "final_train_loss": metrics.get("train_loss", "N/A"),
             "final_test_loss": metrics.get("test_loss", "N/A"),
+            "avg_voxel_error": metrics.get("avg_voxel_error"),
             "num_epochs": num_epochs,
             "is_kfold": is_kfold,
             "k": k,
@@ -794,6 +1357,8 @@ class InverseModelsPage:
                         fold_info["epochs_completed"] = m["epochs_completed"]
                     if "stopped_early" in m:
                         fold_info["stopped_early"] = m["stopped_early"]
+                    if "avg_voxel_error" in m:
+                        fold_info["avg_voxel_error"] = m["avg_voxel_error"]
                     info["fold_details"].append(fold_info)
 
                 # Calculate statistics across folds
@@ -860,14 +1425,42 @@ class InverseModelsPage:
             cnn_dropout = architecture_config.get("cnn_dropout")
             if cnn_dropout is not None:
                 info["cnn_dropout"] = cnn_dropout
+            cnn_use_residual = architecture_config.get("cnn_use_residual")
+            if cnn_use_residual is not None:
+                info["cnn_use_residual"] = cnn_use_residual
 
-        # Add k-space config if available
-        kspace_config = data.get("kspace_config", {})
-        if kspace_config:
-            grid_size = kspace_config.get("grid_size")
+            # 2D CNN specific config
+            cnn2d_pool_size = architecture_config.get("cnn2d_pool_size")
+            if cnn2d_pool_size is not None:
+                info["cnn2d_pool_size"] = cnn2d_pool_size
+            cnn2d_kernel_size = architecture_config.get("cnn2d_kernel_size")
+            if cnn2d_kernel_size is not None:
+                info["cnn2d_kernel_size"] = cnn2d_kernel_size
+            cnn2d_stride = architecture_config.get("cnn2d_stride")
+            if cnn2d_stride is not None:
+                info["cnn2d_stride"] = cnn2d_stride
+
+        # Add output config if available (new format)
+        output_config = data.get("output_config", {})
+        if output_config:
+            grid_size = output_config.get("voxel_grid_size")
+            use_kspace = output_config.get("use_kspace", True)
             if grid_size:
-                info["kspace_grid_size"] = grid_size
-                info["kspace_total_coeffs"] = f"{grid_size**3 * 2:,}"  # real + imag
+                info["voxel_grid_size"] = grid_size
+                info["use_kspace"] = use_kspace
+                if use_kspace:
+                    info["output_total"] = f"{grid_size**3 * 2:,}"  # real + imag
+                else:
+                    info["output_total"] = f"{grid_size**3:,}"  # voxel densities
+        else:
+            # Backward compatibility: old kspace_config format
+            kspace_config = data.get("kspace_config", {})
+            if kspace_config:
+                grid_size = kspace_config.get("grid_size")
+                if grid_size:
+                    info["voxel_grid_size"] = grid_size
+                    info["use_kspace"] = True  # Old format always used k-space
+                    info["output_total"] = f"{grid_size**3 * 2:,}"
 
         # Add preprocessing config if available
         preprocessing_config = data.get("preprocessing_config", {})
@@ -891,6 +1484,10 @@ class InverseModelsPage:
             info["use_normalization"] = preprocessing_config.get(
                 "use_normalization", False
             )
+            # Sensor selection info
+            sensor_indices = preprocessing_config.get("sensor_indices", [])
+            if sensor_indices:
+                info["num_active_sensors"] = len(sensor_indices)
 
         # Extract architecture info from the model object
         # For K-fold models, use the first model in the list
@@ -975,14 +1572,13 @@ class InverseModelsPage:
         self.state.inv_test_per_fold_hashes = []
         self.state.inv_test_has_predictions = False
         self.state.inv_test_num_predictions = 0
+        self._test_model_use_kspace = True  # Default to k-space for backward compat
 
         if not inv_test_selected_model or not self.state.inv_test_selected_batch:
             return
 
         model_dir = (
-            DEFAULT_DATA_DIR
-            / self.state.inv_test_selected_batch
-            / "inverse_models"
+            DEFAULT_DATA_DIR / self.state.inv_test_selected_batch / "inverse_models"
         )
 
         # Check for K-fold by looking for metadata file (fast, small file)
@@ -1007,6 +1603,9 @@ class InverseModelsPage:
                 # Default to first fold
                 if k > 0:
                     self.state.inv_test_selected_fold = "1"
+                # Get use_kspace setting from output_config
+                output_config = data.get("output_config", {})
+                self._test_model_use_kspace = output_config.get("use_kspace", True)
             elif model_path.exists():
                 # Check if this might be old K-fold format by looking for fold files
                 # Old K-fold models don't have separate fold files, so if we find
@@ -1029,6 +1628,9 @@ class InverseModelsPage:
                     with open(model_path, "rb") as f:
                         data = pickle.load(f)
                     self.state.inv_test_is_kfold = data.get("kfold", False)
+                    # Get use_kspace from output_config (backward compat: default True)
+                    output_config = data.get("output_config", {})
+                    self._test_model_use_kspace = output_config.get("use_kspace", True)
                     if self.state.inv_test_is_kfold:
                         k = data.get("k", 0)
                         self.state.inv_test_k = k
@@ -1041,7 +1643,12 @@ class InverseModelsPage:
                         ]
                         if k > 0:
                             self.state.inv_test_selected_fold = "1"
-                # else: Small file, assume non-K-fold (don't load, just use predictions)
+                else:
+                    # Small file - load to get use_kspace setting
+                    with open(model_path, "rb") as f:
+                        data = pickle.load(f)
+                    output_config = data.get("output_config", {})
+                    self._test_model_use_kspace = output_config.get("use_kspace", True)
             else:
                 logger.warning(f"Model not found: {inv_test_selected_model}")
                 return
@@ -1161,7 +1768,9 @@ class InverseModelsPage:
 
             # Compute shared color limits from ground truth
             if self._ground_truth_data is not None:
-                voxel_data = self._kspace_to_voxels(self._ground_truth_data)
+                voxel_data = self._data_to_voxels(
+                    self._ground_truth_data, use_kspace=self._test_model_use_kspace
+                )
                 if voxel_data is not None:
                     data_min = float(np.min(voxel_data))
                     data_max = float(np.max(voxel_data))
@@ -1197,27 +1806,30 @@ class InverseModelsPage:
 
         colormap = self.state.inv_selected_colormap
         opacity = self.state.inv_selected_opacity
+        use_kspace = self._test_model_use_kspace
 
         # Render ground truth
         if self._ground_truth_data is not None:
-            self._render_kspace_volume(
+            self._render_volume(
                 self.plotter_ground_truth,
                 self._ground_truth_data,
                 "Ground Truth",
                 colormap=colormap,
                 opacity=opacity,
                 clim=clim,
+                use_kspace=use_kspace,
             )
 
         # Render prediction with same limits
         if self._prediction_data is not None:
-            self._render_kspace_volume(
+            self._render_volume(
                 self.plotter_prediction,
                 self._prediction_data,
                 "Prediction",
                 colormap=colormap,
                 opacity=opacity,
                 clim=clim,
+                use_kspace=use_kspace,
             )
 
         # Update views
@@ -1227,7 +1839,7 @@ class InverseModelsPage:
             self.ctrl.view_update_prediction()
 
     def _kspace_to_voxels(self, data: np.ndarray) -> np.ndarray | None:
-        """Convert k-space data to real-space voxels."""
+        """Convert k-space data to real-space voxels via inverse FFT."""
         try:
             # Convert from flat real/imag to complex 3D
             if data.ndim == 1:
@@ -1253,7 +1865,41 @@ class InverseModelsPage:
             logger.error(f"Failed to convert k-space to voxels: {e}")
             return None
 
-    def _render_kspace_volume(
+    def _flat_voxels_to_3d(self, data: np.ndarray) -> np.ndarray | None:
+        """Reshape flat voxel data to 3D grid (no FFT, direct voxels)."""
+        try:
+            if data.ndim == 1:
+                cube_root = round(len(data) ** (1 / 3))
+                if cube_root**3 == len(data):
+                    return data.reshape((cube_root,) * 3)
+                else:
+                    logger.warning(f"Cannot reshape {len(data)} to cubic grid")
+                    return None
+            else:
+                return data
+        except Exception as e:
+            logger.error(f"Failed to reshape voxel data: {e}")
+            return None
+
+    def _data_to_voxels(
+        self, data: np.ndarray, use_kspace: bool = True
+    ) -> np.ndarray | None:
+        """Convert prediction data to 3D voxels for visualization.
+
+        Args:
+            data: Flattened prediction data (k-space or voxels).
+            use_kspace: If True, data is k-space [real, imag] requiring inverse FFT.
+                       If False, data is raw voxel densities.
+
+        Returns:
+            3D numpy array of voxel values, or None on error.
+        """
+        if use_kspace:
+            return self._kspace_to_voxels(data)
+        else:
+            return self._flat_voxels_to_3d(data)
+
+    def _render_volume(
         self,
         plotter: pv.Plotter,
         data: np.ndarray,
@@ -1261,12 +1907,24 @@ class InverseModelsPage:
         colormap: str = "viridis",
         opacity: str = "sigmoid",
         clim: tuple[float, float] | None = None,
+        use_kspace: bool = True,
     ):
-        """Render k-space data as a volume."""
+        """Render prediction data as a volume.
+
+        Args:
+            plotter: PyVista plotter to render to.
+            data: Flattened prediction data (k-space or voxels).
+            title: Title for the plot (unused, kept for API compat).
+            colormap: Colormap to use.
+            opacity: Opacity preset.
+            clim: Color limits (min, max).
+            use_kspace: If True, data is k-space requiring inverse FFT.
+                       If False, data is raw voxel densities.
+        """
         plotter.clear()
 
         try:
-            voxel_data = self._kspace_to_voxels(data)
+            voxel_data = self._data_to_voxels(data, use_kspace=use_kspace)
             if voxel_data is None:
                 return
 
@@ -1310,12 +1968,98 @@ class InverseModelsPage:
             secs = seconds % 60
             return f"{hours}h {minutes}m {secs:.0f}s"
 
+    def _output_to_voxels(
+        self, data: np.ndarray, use_kspace: bool
+    ) -> np.ndarray | None:
+        """Convert model output (k-space or voxels) to voxel grid.
+
+        Args:
+            data: Flattened model output.
+            use_kspace: If True, data is k-space [real, imag] requiring inverse FFT.
+                       If False, data is raw voxel densities.
+
+        Returns:
+            Voxel grid as numpy array, or None on error.
+        """
+        if use_kspace:
+            # K-space: apply inverse FFT
+            n_half = len(data) // 2
+            # Infer grid shape (3D cube or 2D square)
+            cube_root = round(n_half ** (1 / 3))
+            if cube_root**3 == n_half:
+                shape = (cube_root, cube_root, cube_root)
+            else:
+                square_root = round(n_half ** (1 / 2))
+                if square_root**2 == n_half:
+                    shape = (square_root, square_root)
+                else:
+                    logger.warning(f"Cannot infer grid shape from {n_half} elements")
+                    return None
+
+            real_part = data[:n_half].reshape(shape)
+            imag_part = data[n_half:].reshape(shape)
+            kspace = real_part + 1j * imag_part
+            voxels = np.fft.ifftn(np.fft.ifftshift(kspace))
+            return np.real(voxels)
+        else:
+            # Direct voxels: just reshape
+            n = len(data)
+            cube_root = round(n ** (1 / 3))
+            if cube_root**3 == n:
+                return data.reshape((cube_root, cube_root, cube_root))
+            else:
+                square_root = round(n ** (1 / 2))
+                if square_root**2 == n:
+                    return data.reshape((square_root, square_root))
+                else:
+                    logger.warning(f"Cannot infer grid shape from {n} elements")
+                    return None
+
+    def _compute_average_voxel_error(
+        self,
+        predictions: np.ndarray,
+        targets: np.ndarray,
+        use_kspace: bool,
+    ) -> float | None:
+        """Compute average voxel error across test samples.
+
+        For each sample:
+        1. Convert prediction and target to voxel space (inverse FFT if k-space)
+        2. Compute sum of absolute errors across all voxels
+        3. Average across all samples
+
+        Args:
+            predictions: Array of shape (n_samples, output_dim) with model predictions.
+            targets: Array of shape (n_samples, output_dim) with ground truth.
+            use_kspace: Whether the outputs are in k-space format.
+
+        Returns:
+            Average total absolute error per sample, or None if computation fails.
+        """
+        errors = []
+
+        for i in range(len(predictions)):
+            pred_voxels = self._output_to_voxels(predictions[i], use_kspace)
+            target_voxels = self._output_to_voxels(targets[i], use_kspace)
+
+            if pred_voxels is None or target_voxels is None:
+                continue
+
+            # Sum of absolute errors for this sample
+            sample_error = np.sum(np.abs(pred_voxels - target_voxels))
+            errors.append(sample_error)
+
+        if len(errors) == 0:
+            return None
+
+        return float(np.mean(errors))
+
     def _update_loss_chart(self):
         """Update the loss chart with current training history."""
         if self.loss_chart_widget is None:
             return
 
-        fig, ax = plt.subplots(figsize=(6, 3))
+        fig, ax = plt.subplots(figsize=(10, 4))
 
         # Check if we have K-fold training data
         if len(self._kfold_epochs) > 0 and len(self._kfold_train_losses) > 0:
@@ -1454,6 +2198,344 @@ class InverseModelsPage:
         self.view_loss_chart_widget.update(fig)
         plt.close(fig)
 
+    def _update_view_network_arch_visualization(self):
+        """Update the network architecture visualization in the View tab.
+
+        Uses the saved model info to generate a PlotNeuralNet diagram.
+        """
+        if self.view_network_arch_widget is None:
+            return
+
+        model_info = self.state.inv_view_model_info
+        if not model_info:
+            fig, ax = plt.subplots(figsize=(10, 4))
+            ax.text(
+                0.5,
+                0.5,
+                "Select a model to view architecture",
+                ha="center",
+                va="center",
+                fontsize=12,
+                color="gray",
+            )
+            ax.axis("off")
+            plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+            self.view_network_arch_widget.update(fig)
+            plt.close(fig)
+            return
+
+        architecture = model_info.get("architecture", "")
+
+        # Only visualize neural network models
+        if architecture not in ("mlp", "cnn", "cnn2d"):
+            fig, ax = plt.subplots(figsize=(10, 4))
+            ax.text(
+                0.5,
+                0.5,
+                "Architecture visualization\nnot available for this model type",
+                ha="center",
+                va="center",
+                fontsize=12,
+                color="gray",
+            )
+            ax.axis("off")
+            plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+            self.view_network_arch_widget.update(fig)
+            plt.close(fig)
+            return
+
+        # Import PlotNeuralNet functions
+        try:
+            from sbimaging.simulators.dg.dim3.scripts.visualize_nn_architecture import (
+                compile_tex,
+                generate_cnn2d_arch,
+                generate_cnn_arch,
+                generate_mlp_arch,
+                to_generate,
+            )
+        except ImportError as e:
+            fig, ax = plt.subplots(figsize=(10, 4))
+            ax.text(
+                0.5,
+                0.5,
+                f"PlotNeuralNet not available:\n{e}",
+                ha="center",
+                va="center",
+                fontsize=10,
+                color="red",
+            )
+            ax.axis("off")
+            plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+            self.view_network_arch_widget.update(fig)
+            plt.close(fig)
+            return
+
+        import tempfile
+
+        # Get dimensions from model info
+        input_dim = model_info.get("input_dim", 0)
+        output_dim = model_info.get("output_dim", 0)
+        num_sensors = model_info.get("num_active_sensors", 144)
+        timesteps = input_dim // num_sensors if num_sensors > 0 and input_dim > 0 else 0
+
+        # Generate architecture based on model type
+        try:
+            if architecture == "mlp":
+                hidden_layers = model_info.get("mlp_hidden_layers", [4096, 2048, 1024])
+                arch = generate_mlp_arch(
+                    input_dim=input_dim,
+                    output_dim=output_dim,
+                    hidden_layers=hidden_layers,
+                )
+            elif architecture == "cnn":
+                conv_channels = model_info.get("cnn_conv_channels", [32, 64])
+                pool_size = model_info.get("cnn_pool_size", 16)
+                regressor_hidden = model_info.get("cnn_regressor_hidden", 512)
+                use_residual = model_info.get("cnn_use_residual", True)
+                arch = generate_cnn_arch(
+                    input_dim=input_dim,
+                    output_dim=output_dim,
+                    conv_channels=conv_channels,
+                    pool_size=pool_size,
+                    regressor_hidden=regressor_hidden,
+                    use_residual=use_residual,
+                )
+            elif architecture == "cnn2d":
+                conv_channels = model_info.get("cnn_conv_channels", [32, 64])
+                pool_size = model_info.get("cnn2d_pool_size", (12, 8))
+                if isinstance(pool_size, list):
+                    pool_size = tuple(pool_size)
+                regressor_hidden = model_info.get("cnn_regressor_hidden", 512)
+                use_residual = model_info.get("cnn_use_residual", True)
+                arch = generate_cnn2d_arch(
+                    num_sensors=num_sensors,
+                    timesteps=timesteps,
+                    output_dim=output_dim,
+                    conv_channels=conv_channels,
+                    pool_size=pool_size,
+                    regressor_hidden=regressor_hidden,
+                    use_residual=use_residual,
+                )
+            else:
+                raise ValueError(f"Unknown architecture: {architecture}")
+
+            # Generate and compile in temp directory
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tmpdir = Path(tmpdir)
+                tex_path = tmpdir / "architecture.tex"
+                to_generate(arch, str(tex_path))
+
+                # Compile to PNG
+                png_path = compile_tex(tex_path, tmpdir)
+
+                if png_path and png_path.exists() and png_path.suffix == ".png":
+                    # Load and display the PNG
+                    img = plt.imread(str(png_path))
+                    fig, ax = plt.subplots(figsize=(10, 4))
+                    ax.imshow(img)
+                    ax.axis("off")
+                    plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+                    self.view_network_arch_widget.update(fig)
+                    plt.close(fig)
+                else:
+                    # Compilation failed
+                    fig, ax = plt.subplots(figsize=(10, 4))
+                    ax.text(
+                        0.5,
+                        0.5,
+                        "LaTeX compilation failed.\nCheck pdflatex and poppler-utils.",
+                        ha="center",
+                        va="center",
+                        fontsize=10,
+                        color="red",
+                    )
+                    ax.axis("off")
+                    plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+                    self.view_network_arch_widget.update(fig)
+                    plt.close(fig)
+
+        except Exception as e:
+            # Handle any errors gracefully
+            fig, ax = plt.subplots(figsize=(10, 4))
+            ax.text(
+                0.5,
+                0.5,
+                f"Error generating visualization:\n{e}",
+                ha="center",
+                va="center",
+                fontsize=10,
+                color="red",
+            )
+            ax.axis("off")
+            plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+            self.view_network_arch_widget.update(fig)
+            plt.close(fig)
+
+    def _update_network_arch_visualization(self):
+        """Update the network architecture visualization using PlotNeuralNet.
+
+        Generates a publication-quality 3D architecture diagram using TikZ/LaTeX.
+        """
+        if self.network_arch_widget is None:
+            return
+
+        model_type = self.state.inv_model_type
+
+        # Only visualize neural network models
+        if not model_type.startswith("nn"):
+            fig, ax = plt.subplots(figsize=(10, 4))
+            ax.text(
+                0.5,
+                0.5,
+                "Architecture visualization\nnot available for GP models",
+                ha="center",
+                va="center",
+                fontsize=12,
+                color="gray",
+            )
+            ax.set_xlim(0, 1)
+            ax.set_ylim(0, 1)
+            ax.axis("off")
+            plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+            self.network_arch_widget.update(fig)
+            plt.close(fig)
+            return
+
+        # Get dimensions
+        input_dim = self.state.inv_input_size
+        output_dim = self.state.inv_output_size
+        num_sensors = self._get_num_active_sensors()
+        timesteps = input_dim // num_sensors if num_sensors > 0 else 0
+
+        # Import PlotNeuralNet functions
+        try:
+            from sbimaging.simulators.dg.dim3.scripts.visualize_nn_architecture import (
+                compile_tex,
+                generate_cnn2d_arch,
+                generate_cnn_arch,
+                generate_mlp_arch,
+                to_generate,
+            )
+        except ImportError as e:
+            # Fall back to simple text if PlotNeuralNet not available
+            fig, ax = plt.subplots(figsize=(10, 4))
+            ax.text(
+                0.5,
+                0.5,
+                f"PlotNeuralNet not available:\n{e}",
+                ha="center",
+                va="center",
+                fontsize=10,
+                color="red",
+            )
+            ax.axis("off")
+            plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+            self.network_arch_widget.update(fig)
+            plt.close(fig)
+            return
+
+        import tempfile
+        from pathlib import Path
+
+        # Generate architecture based on model type
+        try:
+            if model_type == "nn_mlp":
+                hidden_layers = self._parse_hidden_layers(
+                    self.state.inv_mlp_hidden_layers
+                )
+                arch = generate_mlp_arch(
+                    input_dim=input_dim,
+                    output_dim=output_dim,
+                    hidden_layers=hidden_layers,
+                )
+            elif model_type == "nn_cnn":
+                conv_channels = self._parse_hidden_layers(
+                    self.state.inv_cnn_conv_channels
+                )
+                pool_size = int(self.state.inv_cnn_pool_size)
+                regressor_hidden = int(self.state.inv_cnn_regressor_hidden)
+                use_residual = bool(self.state.inv_cnn_use_residual)
+                arch = generate_cnn_arch(
+                    input_dim=input_dim,
+                    output_dim=output_dim,
+                    conv_channels=conv_channels,
+                    pool_size=pool_size,
+                    regressor_hidden=regressor_hidden,
+                    use_residual=use_residual,
+                )
+            elif model_type == "nn_cnn2d":
+                conv_channels = self._parse_hidden_layers(
+                    self.state.inv_cnn_conv_channels
+                )
+                pool_h = int(self.state.inv_cnn2d_pool_height)
+                pool_w = int(self.state.inv_cnn2d_pool_width)
+                regressor_hidden = int(self.state.inv_cnn_regressor_hidden)
+                use_residual = bool(self.state.inv_cnn_use_residual)
+                arch = generate_cnn2d_arch(
+                    num_sensors=num_sensors,
+                    timesteps=timesteps,
+                    output_dim=output_dim,
+                    conv_channels=conv_channels,
+                    pool_size=(pool_h, pool_w),
+                    regressor_hidden=regressor_hidden,
+                    use_residual=use_residual,
+                )
+            else:
+                raise ValueError(f"Unknown model type: {model_type}")
+
+            # Generate and compile in temp directory
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tmpdir = Path(tmpdir)
+                tex_path = tmpdir / "architecture.tex"
+                to_generate(arch, str(tex_path))
+
+                # Compile to PNG
+                png_path = compile_tex(tex_path, tmpdir)
+
+                if png_path and png_path.exists() and png_path.suffix == ".png":
+                    # Load and display the PNG
+                    img = plt.imread(str(png_path))
+                    fig, ax = plt.subplots(figsize=(10, 4))
+                    ax.imshow(img)
+                    ax.axis("off")
+                    # Remove all margins around the image
+                    plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+                    self.network_arch_widget.update(fig)
+                    plt.close(fig)
+                else:
+                    # Compilation failed
+                    fig, ax = plt.subplots(figsize=(10, 4))
+                    ax.text(
+                        0.5,
+                        0.5,
+                        "LaTeX compilation failed.\nCheck pdflatex and poppler-utils.",
+                        ha="center",
+                        va="center",
+                        fontsize=10,
+                        color="red",
+                    )
+                    ax.axis("off")
+                    plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+                    self.network_arch_widget.update(fig)
+                    plt.close(fig)
+
+        except Exception as e:
+            # Handle any errors gracefully
+            fig, ax = plt.subplots(figsize=(10, 4))
+            ax.text(
+                0.5,
+                0.5,
+                f"Error generating visualization:\n{e}",
+                ha="center",
+                va="center",
+                fontsize=10,
+                color="red",
+            )
+            ax.axis("off")
+            plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+            self.network_arch_widget.update(fig)
+            plt.close(fig)
+
     def _start_training(self):
         """Start training the inverse model."""
         asyncio.create_task(self._train_model_async())
@@ -1481,6 +2563,7 @@ class InverseModelsPage:
         self._training_start_time = None
         self._training_duration_seconds = None
         self._update_loss_chart()
+        self._update_network_arch_visualization()
 
         batch_dir = DEFAULT_DATA_DIR / batch_name
         sims_dir = batch_dir / "simulations"
@@ -1557,6 +2640,13 @@ class InverseModelsPage:
                     "k": k,
                 }
 
+                # Aggregate average voxel error across folds
+                voxel_errors = [
+                    m["avg_voxel_error"] for m in fold_metrics if "avg_voxel_error" in m
+                ]
+                if voxel_errors:
+                    metrics["avg_voxel_error"] = float(np.mean(voxel_errors))
+
                 # Save K-fold model (contains all K models and predictions)
                 self.state.inv_training_message = "Saving models..."
                 self.state.inv_training_progress = 95
@@ -1587,6 +2677,8 @@ class InverseModelsPage:
 
                 self._log(f"K-fold models saved to {model_path}")
                 self._log(f"Average test loss: {avg_test_loss:.6f}")
+                if "avg_voxel_error" in metrics:
+                    self._log(f"Average voxel error: {metrics['avg_voxel_error']:.6f}")
 
             else:
                 # Regular training
@@ -1682,6 +2774,9 @@ class InverseModelsPage:
 
     def _get_current_preprocessing_params(self) -> dict:
         """Get current preprocessing parameters from UI state."""
+        # Get active sensor indices (sorted for consistent cache key)
+        active_sensor_indices = self._get_active_sensor_indices()
+
         return {
             "trim_timesteps": int(self.state.inv_trim_timesteps),
             "downsample_factor": int(self.state.inv_downsample_factor),
@@ -1691,7 +2786,9 @@ class InverseModelsPage:
             "use_normalization": bool(self.state.inv_use_normalization),
             "use_noise": bool(self.state.inv_use_noise),
             "noise_level": float(self.state.inv_noise_level),
-            "kspace_grid_size": int(self.state.inv_kspace_grid_size),
+            "voxel_grid_size": int(self.state.inv_voxel_grid_size),
+            "use_kspace": bool(self.state.inv_use_kspace),
+            "sensor_indices": active_sensor_indices,  # Empty list means use all sensors
         }
 
     def _check_training_data(self, sims_dir: Path) -> bool:
@@ -1772,13 +2869,16 @@ class InverseModelsPage:
                     use_normalization=current_params["use_normalization"],
                     use_noise=current_params["use_noise"],
                     noise_level=current_params["noise_level"],
+                    sensor_indices=current_params["sensor_indices"],
                 )
                 with open(sim_dir / "model_input.pkl", "wb") as f:
                     pickle.dump(input_data, f)
 
-                # Generate model output (k-space from config)
-                output_data = self._process_config_to_kspace(
-                    config_file, grid_size=current_params["kspace_grid_size"]
+                # Generate model output (k-space or voxels from config)
+                output_data = self._process_config_to_target(
+                    config_file,
+                    grid_size=current_params["voxel_grid_size"],
+                    use_kspace=current_params["use_kspace"],
                 )
                 with open(sim_dir / "model_output.pkl", "wb") as f:
                     pickle.dump(output_data, f)
@@ -1801,6 +2901,7 @@ class InverseModelsPage:
         use_normalization: bool = False,
         use_noise: bool = False,
         noise_level: float = 0.05,
+        sensor_indices: list[int] | None = None,
     ) -> np.ndarray:
         """Process sensor data for model input.
 
@@ -1814,6 +2915,7 @@ class InverseModelsPage:
             use_normalization: Whether to normalize each channel to [-1, 1].
             use_noise: Whether to add Gaussian noise to the signal.
             noise_level: Fraction (0-1) of global peak to use as noise std.
+            sensor_indices: List of sensor indices to use. If empty or None, use all.
 
         Returns:
             Flattened sensor data array.
@@ -1832,6 +2934,10 @@ class InverseModelsPage:
             sensor_data = sensor_data.get()
 
         sensor_data = np.asarray(sensor_data)
+
+        # Filter sensors if indices specified
+        if sensor_indices and sensor_data.ndim == 2:
+            sensor_data = sensor_data[sensor_indices, :]
 
         # Trim initial transient and downsample
         if sensor_data.ndim == 2:
@@ -1952,14 +3058,29 @@ class InverseModelsPage:
         noise = np.random.normal(0, noise_std, sensor_data.shape)
         return sensor_data + noise
 
-    def _process_config_to_kspace(
-        self, config_file: Path, grid_size: int | None = None
+    def _process_config_to_target(
+        self,
+        config_file: Path,
+        grid_size: int | None = None,
+        use_kspace: bool | None = None,
     ):
-        """Convert config parameters to k-space representation."""
+        """Convert config parameters to target representation (k-space or voxels).
+
+        Args:
+            config_file: Path to the TOML config file.
+            grid_size: Voxel grid resolution. Defaults to state value.
+            use_kspace: If True, return k-space (FFT). If False, return raw voxels.
+                       Defaults to state value.
+
+        Returns:
+            Flattened array: k-space [real, imag] or voxel densities.
+        """
         import tomli
 
         if grid_size is None:
-            grid_size = int(self.state.inv_kspace_grid_size)
+            grid_size = int(self.state.inv_voxel_grid_size)
+        if use_kspace is None:
+            use_kspace = bool(self.state.inv_use_kspace)
 
         with open(config_file, "rb") as f:
             config = tomli.load(f)
@@ -1991,15 +3112,19 @@ class InverseModelsPage:
                 )
                 grid[mask] = density
 
-        # Compute FFT
-        kspace = np.fft.fftn(grid)
-        kspace = np.fft.fftshift(kspace)
+        if use_kspace:
+            # Compute FFT and return k-space representation
+            kspace = np.fft.fftn(grid)
+            kspace = np.fft.fftshift(kspace)
 
-        # Split into real and imaginary
-        real_part = np.real(kspace).flatten()
-        imag_part = np.imag(kspace).flatten()
+            # Split into real and imaginary
+            real_part = np.real(kspace).flatten()
+            imag_part = np.imag(kspace).flatten()
 
-        return np.concatenate([real_part, imag_part]).astype(np.float32)
+            return np.concatenate([real_part, imag_part]).astype(np.float32)
+        else:
+            # Return raw voxel densities
+            return grid.flatten().astype(np.float32)
 
     def _load_training_data(
         self, sims_dir: Path
@@ -2028,10 +3153,18 @@ class InverseModelsPage:
         progress_callback,
     ):
         """Train the inverse model."""
+        use_kspace = bool(self.state.inv_use_kspace)
+
         if model_type.startswith("nn"):
             from sbimaging.inverse_models.nn.network import NeuralNetworkModel
 
-            architecture = "cnn" if model_type == "nn_cnn" else "mlp"
+            # Map model type to architecture
+            if model_type == "nn_cnn":
+                architecture = "cnn"
+            elif model_type == "nn_cnn2d":
+                architecture = "cnn2d"
+            else:
+                architecture = "mlp"
 
             # Parse MLP configuration
             mlp_hidden_layers = self._parse_hidden_layers(
@@ -2039,13 +3172,28 @@ class InverseModelsPage:
             )
             mlp_dropout = float(self.state.inv_mlp_dropout)
 
-            # Parse CNN configuration
+            # Parse CNN configuration (shared by 1D and 2D CNN)
             cnn_conv_channels = self._parse_hidden_layers(
                 self.state.inv_cnn_conv_channels
             )
             cnn_pool_size = int(self.state.inv_cnn_pool_size)
             cnn_regressor_hidden = int(self.state.inv_cnn_regressor_hidden)
             cnn_dropout = float(self.state.inv_cnn_dropout)
+
+            # 2D CNN specific configuration
+            cnn2d_num_sensors = self._get_num_active_sensors()
+            cnn2d_pool_size = (
+                int(self.state.inv_cnn2d_pool_height),
+                int(self.state.inv_cnn2d_pool_width),
+            )
+            cnn2d_kernel_size = (
+                int(self.state.inv_cnn2d_kernel_height),
+                int(self.state.inv_cnn2d_kernel_width),
+            )
+            cnn2d_stride = (
+                int(self.state.inv_cnn2d_stride_height),
+                int(self.state.inv_cnn2d_stride_width),
+            )
 
             model = NeuralNetworkModel(
                 name=model_type,
@@ -2056,6 +3204,11 @@ class InverseModelsPage:
                 cnn_pool_size=cnn_pool_size,
                 cnn_regressor_hidden=cnn_regressor_hidden,
                 cnn_dropout=cnn_dropout,
+                cnn_use_residual=bool(self.state.inv_cnn_use_residual),
+                cnn2d_num_sensors=cnn2d_num_sensors,
+                cnn2d_pool_size=cnn2d_pool_size,
+                cnn2d_kernel_size=cnn2d_kernel_size,
+                cnn2d_stride=cnn2d_stride,
             )
             # NN model handles train/test split internally
             metrics = model.train(
@@ -2071,6 +3224,18 @@ class InverseModelsPage:
                 early_stopping_patience=int(self.state.inv_early_stopping_patience),
             )
             test_ids = model.test_indices
+
+            # Compute average voxel error on test set
+            test_indices = [sample_ids.index(tid) for tid in test_ids]
+            X_test = X[test_indices]
+            y_test = y[test_indices]
+            predictions = model.predict(X_test)
+            avg_voxel_error = self._compute_average_voxel_error(
+                predictions, y_test, use_kspace
+            )
+            if avg_voxel_error is not None:
+                metrics["avg_voxel_error"] = avg_voxel_error
+
         else:
             from sbimaging.inverse_models.base import train_test_split_by_index
             from sbimaging.inverse_models.gp.emulator import GaussianProcessModel
@@ -2087,6 +3252,14 @@ class InverseModelsPage:
 
             # Evaluate
             metrics = model.evaluate(X_test, y_test)
+
+            # Compute average voxel error on test set
+            predictions = model.predict(X_test)
+            avg_voxel_error = self._compute_average_voxel_error(
+                predictions, y_test, use_kspace
+            )
+            if avg_voxel_error is not None:
+                metrics["avg_voxel_error"] = avg_voxel_error
 
         return model, test_ids, metrics
 
@@ -2205,21 +3378,34 @@ class InverseModelsPage:
                 )
 
             models.append(model)
-            fold_metrics.append(metrics)
 
             # Generate predictions for test samples in this fold
             fold_test_hashes = []
+            fold_predictions = []
             for i, sample_id in enumerate(test_ids):
                 X_single = X_test[i : i + 1]
                 pred = model.predict(X_single)
                 all_predictions[sample_id] = pred.ravel()
                 all_test_hashes.append(sample_id)
                 fold_test_hashes.append(sample_id)
+                fold_predictions.append(pred.ravel())
             per_fold_test_hashes.append(fold_test_hashes)
+
+            # Compute average voxel error for this fold
+            use_kspace = bool(self.state.inv_use_kspace)
+            fold_predictions_arr = np.array(fold_predictions)
+            avg_voxel_error = self._compute_average_voxel_error(
+                fold_predictions_arr, y_test, use_kspace
+            )
+            if avg_voxel_error is not None:
+                metrics["avg_voxel_error"] = avg_voxel_error
+
+            fold_metrics.append(metrics)
 
             self._log(
                 f"Fold {fold_idx + 1}: Train={metrics['train_loss']:.6f}, "
                 f"Test={metrics['test_loss']:.6f}"
+                + (f", Voxel Error={avg_voxel_error:.6f}" if avg_voxel_error else "")
             )
 
         return (
@@ -2242,7 +3428,13 @@ class InverseModelsPage:
         """Train a single fold for neural network models."""
         from sbimaging.inverse_models.nn.network import NeuralNetworkModel
 
-        architecture = "cnn" if model_type == "nn_cnn" else "mlp"
+        # Map model type to architecture
+        if model_type == "nn_cnn":
+            architecture = "cnn"
+        elif model_type == "nn_cnn2d":
+            architecture = "cnn2d"
+        else:
+            architecture = "mlp"
 
         # Parse architecture config
         mlp_hidden_layers = self._parse_hidden_layers(self.state.inv_mlp_hidden_layers)
@@ -2251,6 +3443,21 @@ class InverseModelsPage:
         cnn_pool_size = int(self.state.inv_cnn_pool_size)
         cnn_regressor_hidden = int(self.state.inv_cnn_regressor_hidden)
         cnn_dropout = float(self.state.inv_cnn_dropout)
+
+        # 2D CNN specific configuration
+        cnn2d_num_sensors = self._get_num_active_sensors()
+        cnn2d_pool_size = (
+            int(self.state.inv_cnn2d_pool_height),
+            int(self.state.inv_cnn2d_pool_width),
+        )
+        cnn2d_kernel_size = (
+            int(self.state.inv_cnn2d_kernel_height),
+            int(self.state.inv_cnn2d_kernel_width),
+        )
+        cnn2d_stride = (
+            int(self.state.inv_cnn2d_stride_height),
+            int(self.state.inv_cnn2d_stride_width),
+        )
 
         model = NeuralNetworkModel(
             name=model_type,
@@ -2261,6 +3468,11 @@ class InverseModelsPage:
             cnn_pool_size=cnn_pool_size,
             cnn_regressor_hidden=cnn_regressor_hidden,
             cnn_dropout=cnn_dropout,
+            cnn_use_residual=bool(self.state.inv_cnn_use_residual),
+            cnn2d_num_sensors=cnn2d_num_sensors,
+            cnn2d_pool_size=cnn2d_pool_size,
+            cnn2d_kernel_size=cnn2d_kernel_size,
+            cnn2d_stride=cnn2d_stride,
         )
 
         # Train with pre-split data (test_fraction=0 since we already split)
@@ -2365,9 +3577,23 @@ class InverseModelsPage:
                 "cnn_pool_size": int(self.state.inv_cnn_pool_size),
                 "cnn_regressor_hidden": int(self.state.inv_cnn_regressor_hidden),
                 "cnn_dropout": float(self.state.inv_cnn_dropout),
+                "cnn_use_residual": bool(self.state.inv_cnn_use_residual),
+                "cnn2d_pool_size": (
+                    int(self.state.inv_cnn2d_pool_height),
+                    int(self.state.inv_cnn2d_pool_width),
+                ),
+                "cnn2d_kernel_size": (
+                    int(self.state.inv_cnn2d_kernel_height),
+                    int(self.state.inv_cnn2d_kernel_width),
+                ),
+                "cnn2d_stride": (
+                    int(self.state.inv_cnn2d_stride_height),
+                    int(self.state.inv_cnn2d_stride_width),
+                ),
             },
-            "kspace_config": {
-                "grid_size": int(self.state.inv_kspace_grid_size),
+            "output_config": {
+                "voxel_grid_size": int(self.state.inv_voxel_grid_size),
+                "use_kspace": bool(self.state.inv_use_kspace),
             },
             "preprocessing_config": {
                 "trim_timesteps": int(self.state.inv_trim_timesteps),
@@ -2378,6 +3604,8 @@ class InverseModelsPage:
                 "use_normalization": bool(self.state.inv_use_normalization),
                 "use_noise": bool(self.state.inv_use_noise),
                 "noise_level": float(self.state.inv_noise_level),
+                "sensor_indices": self._get_active_sensor_indices(),
+                "num_sensors": self._get_num_active_sensors(),
             },
             "training_history": {
                 "kfold_epochs": [list(e) for e in self._kfold_epochs],
@@ -2450,9 +3678,23 @@ class InverseModelsPage:
                 "cnn_pool_size": int(self.state.inv_cnn_pool_size),
                 "cnn_regressor_hidden": int(self.state.inv_cnn_regressor_hidden),
                 "cnn_dropout": float(self.state.inv_cnn_dropout),
+                "cnn_use_residual": bool(self.state.inv_cnn_use_residual),
+                "cnn2d_pool_size": (
+                    int(self.state.inv_cnn2d_pool_height),
+                    int(self.state.inv_cnn2d_pool_width),
+                ),
+                "cnn2d_kernel_size": (
+                    int(self.state.inv_cnn2d_kernel_height),
+                    int(self.state.inv_cnn2d_kernel_width),
+                ),
+                "cnn2d_stride": (
+                    int(self.state.inv_cnn2d_stride_height),
+                    int(self.state.inv_cnn2d_stride_width),
+                ),
             },
-            "kspace_config": {
-                "grid_size": int(self.state.inv_kspace_grid_size),
+            "output_config": {
+                "voxel_grid_size": int(self.state.inv_voxel_grid_size),
+                "use_kspace": bool(self.state.inv_use_kspace),
             },
             "preprocessing_config": {
                 "trim_timesteps": int(self.state.inv_trim_timesteps),
@@ -2463,6 +3705,8 @@ class InverseModelsPage:
                 "use_normalization": bool(self.state.inv_use_normalization),
                 "use_noise": bool(self.state.inv_use_noise),
                 "noise_level": float(self.state.inv_noise_level),
+                "sensor_indices": self._get_active_sensor_indices(),
+                "num_sensors": self._get_num_active_sensors(),
             },
             "training_history": {
                 "epochs": self._loss_epochs.copy(),
@@ -2532,11 +3776,13 @@ class InverseModelsPage:
             # training to make the model robust, but we test on clean signals
             use_noise = preprocessing_config.get("use_noise", False)
             noise_level = preprocessing_config.get("noise_level", 0.0)
+            sensor_indices = preprocessing_config.get("sensor_indices", [])
 
             logger.info(
                 f"Testing with preprocessing: trim={trim_timesteps}, "
                 f"downsample={downsample_factor}, compression={use_compression}"
                 + (f", trained with noise={noise_level:.0%}" if use_noise else "")
+                + (f", sensors={len(sensor_indices)}" if sensor_indices else "")
             )
 
             self.state.inv_test_message = f"Testing on {len(test_hashes)} samples..."
@@ -2569,6 +3815,7 @@ class InverseModelsPage:
                     compression_threshold=compression_threshold,
                     compression_ratio=compression_ratio,
                     use_normalization=use_normalization,
+                    sensor_indices=sensor_indices,
                 )
 
                 X_test = np.asarray(X_test)
@@ -2733,13 +3980,20 @@ class InverseModelsPage:
                                 "{{ inv_output_size.toLocaleString() }}",
                                 classes="text-primary",
                             )
+                            # Show formula based on k-space vs voxel mode
                             html.Span(
-                                " ({{ inv_kspace_grid_size }}³ × 2)",
+                                " ({{ inv_voxel_grid_size }}³ × 2)",
                                 classes="text-medium-emphasis",
+                                v_if=("inv_use_kspace",),
+                            )
+                            html.Span(
+                                " ({{ inv_voxel_grid_size }}³)",
+                                classes="text-medium-emphasis",
+                                v_if=("!inv_use_kspace",),
                             )
 
                 with v3.VRow(dense=True):
-                    with v3.VCol(cols=4):
+                    with v3.VCol(cols=3):
                         v3.VTextField(
                             v_model=("inv_trim_timesteps",),
                             label="Trim Timesteps",
@@ -2748,7 +4002,7 @@ class InverseModelsPage:
                             hint="Skip initial timesteps",
                             persistent_hint=True,
                         )
-                    with v3.VCol(cols=4):
+                    with v3.VCol(cols=3):
                         v3.VTextField(
                             v_model=("inv_downsample_factor",),
                             label="Downsample",
@@ -2757,13 +4011,21 @@ class InverseModelsPage:
                             hint=("inv_downsample_hint",),
                             persistent_hint=True,
                         )
-                    with v3.VCol(cols=4):
+                    with v3.VCol(cols=3):
                         v3.VTextField(
-                            v_model=("inv_kspace_grid_size",),
-                            label="K-Space Grid",
+                            v_model=("inv_voxel_grid_size",),
+                            label="Voxel Grid Size",
                             type="number",
                             density="compact",
                             hint="e.g., 64 = 64³ voxels",
+                            persistent_hint=True,
+                        )
+                    with v3.VCol(cols=3):
+                        v3.VCheckbox(
+                            v_model=("inv_use_kspace",),
+                            label="Use K-Space",
+                            density="compact",
+                            hint="FFT of voxels",
                             persistent_hint=True,
                         )
 
@@ -2790,10 +4052,29 @@ class InverseModelsPage:
                                 persistent_hint=True,
                             )
 
-                # === CNN ARCHITECTURE SECTION ===
-                with html.Div(v_show=("inv_model_type === 'nn_cnn'",)):
+                # === CNN ARCHITECTURE SECTION (shared by 1D and 2D CNN) ===
+                with html.Div(
+                    v_show=(
+                        "inv_model_type === 'nn_cnn' || inv_model_type === 'nn_cnn2d'",
+                    )
+                ):
                     v3.VDivider(classes="my-3")
-                    html.Div("CNN Architecture", classes="text-subtitle-2 mb-2")
+                    html.Div(
+                        "{{ inv_model_type === 'nn_cnn2d' ? '2D CNN Architecture' : '1D CNN Architecture' }}",
+                        classes="text-subtitle-2 mb-2",
+                    )
+
+                    # 2D CNN explanation
+                    with html.Div(
+                        v_show=("inv_model_type === 'nn_cnn2d'",),
+                        classes="text-caption mb-2",
+                        style="color: #666;",
+                    ):
+                        html.Span(
+                            "2D CNN preserves sensor × time structure instead of flattening. "
+                            "Input shape: (sensors, timesteps) → 2D convolutions."
+                        )
+
                     v3.VTextField(
                         v_model=("inv_cnn_conv_channels",),
                         label="Conv Channels",
@@ -2802,15 +4083,6 @@ class InverseModelsPage:
                         persistent_hint=True,
                     )
                     with v3.VRow(dense=True):
-                        with v3.VCol(cols=4):
-                            v3.VTextField(
-                                v_model=("inv_cnn_pool_size",),
-                                label="Pool Size",
-                                type="number",
-                                density="compact",
-                                hint="Adaptive pool output size",
-                                persistent_hint=True,
-                            )
                         with v3.VCol(cols=4):
                             v3.VTextField(
                                 v_model=("inv_cnn_regressor_hidden",),
@@ -2830,6 +4102,108 @@ class InverseModelsPage:
                                 hint="0-1",
                                 persistent_hint=True,
                             )
+                    with v3.VRow(dense=True, align="center"):
+                        with v3.VCol(cols="auto"):
+                            v3.VCheckbox(
+                                v_model=("inv_cnn_use_residual",),
+                                label="Use Residual Blocks",
+                                density="compact",
+                                hide_details=True,
+                                hint="Add skip connections after conv layers",
+                            )
+
+                    # 1D CNN specific: pool size
+                    with html.Div(v_show=("inv_model_type === 'nn_cnn'",)):
+                        with v3.VRow(dense=True):
+                            with v3.VCol(cols=4):
+                                v3.VTextField(
+                                    v_model=("inv_cnn_pool_size",),
+                                    label="Pool Size",
+                                    type="number",
+                                    density="compact",
+                                    hint="Adaptive pool output size",
+                                    persistent_hint=True,
+                                )
+
+                    # 2D CNN specific: kernel, stride, pool
+                    with html.Div(v_show=("inv_model_type === 'nn_cnn2d'",)):
+                        # Kernel size
+                        html.Div(
+                            "Kernel Size (H×W)",
+                            classes="text-caption mt-2 mb-1",
+                            style="color: #666;",
+                        )
+                        with v3.VRow(dense=True):
+                            with v3.VCol(cols=3):
+                                v3.VTextField(
+                                    v_model=("inv_cnn2d_kernel_height",),
+                                    label="Height",
+                                    type="number",
+                                    density="compact",
+                                    hint="Sensor dimension (small)",
+                                    persistent_hint=True,
+                                )
+                            with v3.VCol(cols=3):
+                                v3.VTextField(
+                                    v_model=("inv_cnn2d_kernel_width",),
+                                    label="Width",
+                                    type="number",
+                                    density="compact",
+                                    hint="Time dimension (large for waves)",
+                                    persistent_hint=True,
+                                )
+
+                        # Stride
+                        html.Div(
+                            "Stride (H×W)",
+                            classes="text-caption mt-2 mb-1",
+                            style="color: #666;",
+                        )
+                        with v3.VRow(dense=True):
+                            with v3.VCol(cols=3):
+                                v3.VTextField(
+                                    v_model=("inv_cnn2d_stride_height",),
+                                    label="Height",
+                                    type="number",
+                                    density="compact",
+                                    hint="1=preserve sensors",
+                                    persistent_hint=True,
+                                )
+                            with v3.VCol(cols=3):
+                                v3.VTextField(
+                                    v_model=("inv_cnn2d_stride_width",),
+                                    label="Width",
+                                    type="number",
+                                    density="compact",
+                                    hint="2=downsample time",
+                                    persistent_hint=True,
+                                )
+
+                        # Pool size
+                        html.Div(
+                            "Adaptive Pool Output (H×W)",
+                            classes="text-caption mt-2 mb-1",
+                            style="color: #666;",
+                        )
+                        with v3.VRow(dense=True):
+                            with v3.VCol(cols=3):
+                                v3.VTextField(
+                                    v_model=("inv_cnn2d_pool_height",),
+                                    label="Height",
+                                    type="number",
+                                    density="compact",
+                                    hint="Sensor positions",
+                                    persistent_hint=True,
+                                )
+                            with v3.VCol(cols=3):
+                                v3.VTextField(
+                                    v_model=("inv_cnn2d_pool_width",),
+                                    label="Width",
+                                    type="number",
+                                    density="compact",
+                                    hint="Time positions",
+                                    persistent_hint=True,
+                                )
 
                 # === SIGNAL PROCESSING SECTION ===
                 v3.VDivider(classes="my-3")
@@ -2937,6 +4311,97 @@ class InverseModelsPage:
                                     plt.figure(figsize=(5, 2))
                                 )
 
+                # === SENSORS SECTION ===
+                v3.VDivider(classes="my-3")
+                html.Div("Sensors", classes="text-subtitle-2 mb-2")
+                with v3.VRow(dense=True):
+                    # Left side: grid of sensor checkboxes by face
+                    with v3.VCol(cols=5):
+                        # Sensor count summary at top
+                        with html.Div(classes="text-caption mb-2"):
+                            html.Span(
+                                "Using {{ inv_active_sensor_count }} of {{ inv_total_sensor_count }} sensors",
+                                classes="text-medium-emphasis",
+                            )
+
+                        # Select all / Deselect all buttons
+                        with html.Div(classes="d-flex ga-2 mb-2"):
+                            v3.VBtn(
+                                "Select All",
+                                size="x-small",
+                                variant="outlined",
+                                click=self._select_all_sensors,
+                            )
+                            v3.VBtn(
+                                "Deselect All",
+                                size="x-small",
+                                variant="outlined",
+                                click=self._deselect_all_sensors,
+                            )
+
+                        # Sync faces toggle
+                        v3.VCheckbox(
+                            v_model=("inv_sensor_sync_faces",),
+                            label="Sync across faces",
+                            density="compact",
+                            hide_details=True,
+                            classes="mt-0 mb-1",
+                        )
+
+                        # Scrollable container with sensors grouped by face as grids
+                        with html.Div(
+                            v_show=("inv_total_sensor_count > 0",),
+                            style="max-height: 250px; overflow-y: auto;",
+                            classes="border rounded pa-1",
+                        ):
+                            # Iterate over faces
+                            with html.Div(
+                                v_for="faceGroup in inv_sensors_by_face",
+                                key=("faceGroup.face",),
+                                classes="mb-2",
+                            ):
+                                # Face header
+                                html.Div(
+                                    "{{ faceGroup.label }}",
+                                    classes="text-caption font-weight-bold bg-grey-lighten-3 px-2 py-1",
+                                )
+                                # Sensor grid for this face
+                                with html.Div(
+                                    style=(
+                                        "`display: grid; grid-template-columns: repeat(${inv_sensor_grid_size}, 20px); gap: 2px; padding: 4px;`",
+                                    ),
+                                ):
+                                    # Each sensor as a clickable cell
+                                    with html.Div(
+                                        v_for="sensor in faceGroup.sensors",
+                                        key=("sensor.idx",),
+                                        style="width: 18px; height: 18px; cursor: pointer; display: flex; align-items: center; justify-content: center;",
+                                        click=(self._toggle_sensor, "[sensor.idx]"),
+                                    ):
+                                        html.Div(
+                                            v_if=("sensor.active",),
+                                            style="width: 14px; height: 14px; background-color: #4CAF50; border-radius: 2px;",
+                                        )
+                                        html.Div(
+                                            v_else=True,
+                                            style="width: 14px; height: 14px; background-color: #E0E0E0; border-radius: 2px; border: 1px solid #BDBDBD;",
+                                        )
+
+                    # Right side: unfolded cube visualization
+                    with v3.VCol(cols=7):
+                        with html.Div(v_show=("inv_selected_batch",)):
+                            with v3.VSheet(
+                                rounded=True,
+                                classes="d-flex align-center justify-center",
+                                style="min-height: 180px;",
+                            ):
+                                self.sensor_cube_widget = mpl_widgets.Figure(
+                                    figure=None
+                                )
+                                self.sensor_cube_widget.update(
+                                    plt.figure(figsize=(4, 3))
+                                )
+
                 # === OPTIONS SECTION ===
                 v3.VDivider(classes="my-3")
                 html.Div("Options", classes="text-subtitle-2 mb-2")
@@ -3009,10 +4474,20 @@ class InverseModelsPage:
                 with v3.VSheet(
                     rounded=True,
                     classes="mt-2 d-flex align-center justify-center",
-                    style="min-height: 200px;",
+                    style="min-height: 280px;",
                 ):
                     self.loss_chart_widget = mpl_widgets.Figure(figure=None)
-                    self.loss_chart_widget.update(plt.figure(figsize=(6, 3)))
+                    self.loss_chart_widget.update(plt.figure(figsize=(10, 4)))
+
+                # Network architecture visualization (PlotNeuralNet 3D diagram)
+                with v3.VSheet(
+                    rounded=True,
+                    classes="mt-2 d-flex align-center justify-center",
+                    style="min-height: 260px;",
+                    v_show=("inv_model_type.startsWith('nn')",),
+                ):
+                    self.network_arch_widget = mpl_widgets.Figure(figure=None)
+                    self.network_arch_widget.update(plt.figure(figsize=(10, 4)))
 
     def _build_view_tab(self):
         """Build the View tab content for inspecting trained models."""
@@ -3088,7 +4563,9 @@ class InverseModelsPage:
 
                             # MLP hidden layers (only for MLP architecture)
                             with v3.VListItem(
-                                v_if=("inv_view_model_info.mlp_hidden_layers_str",)
+                                v_if=(
+                                    "inv_view_model_info.mlp_hidden_layers_str && inv_view_model_info.architecture === 'mlp'",
+                                )
                             ):
                                 with v3.VListItemTitle():
                                     html.Span("Hidden Layers: ")
@@ -3212,28 +4689,40 @@ class InverseModelsPage:
                                         "{{ inv_view_model_info.test_fraction }}"
                                     )
 
-                        # K-Space configuration section
-                        with html.Div(v_if=("inv_view_model_info.kspace_grid_size",)):
+                        # Output configuration section
+                        with html.Div(v_if=("inv_view_model_info.voxel_grid_size",)):
                             v3.VDivider(classes="my-2")
                             html.Div(
-                                "K-Space Configuration",
+                                "Output Configuration",
                                 classes="text-caption text-medium-emphasis mb-1",
                             )
                             with v3.VList(density="compact"):
                                 with v3.VListItem():
                                     with v3.VListItemTitle():
-                                        html.Span("Grid Size: ")
+                                        html.Span("Voxel Grid Size: ")
                                         html.Strong(
-                                            "{{ inv_view_model_info.kspace_grid_size }}³"
+                                            "{{ inv_view_model_info.voxel_grid_size }}³"
+                                        )
+
+                                with v3.VListItem():
+                                    with v3.VListItemTitle():
+                                        html.Span("Output Type: ")
+                                        html.Strong(
+                                            "K-Space",
+                                            v_if=("inv_view_model_info.use_kspace",),
+                                        )
+                                        html.Strong(
+                                            "Voxels",
+                                            v_if=("!inv_view_model_info.use_kspace",),
                                         )
 
                                 with v3.VListItem(
-                                    v_if=("inv_view_model_info.kspace_total_coeffs",)
+                                    v_if=("inv_view_model_info.output_total",)
                                 ):
                                     with v3.VListItemTitle():
-                                        html.Span("Total Coefficients: ")
+                                        html.Span("Total Output Size: ")
                                         html.Strong(
-                                            "{{ inv_view_model_info.kspace_total_coeffs }}"
+                                            "{{ inv_view_model_info.output_total }}"
                                         )
 
                         # Preprocessing configuration section
@@ -3336,6 +4825,19 @@ class InverseModelsPage:
                                         "{{ typeof inv_view_model_info.final_test_loss === 'number' ? inv_view_model_info.final_test_loss.toExponential(4) : inv_view_model_info.final_test_loss }}"
                                     )
 
+                            # Average voxel error
+                            with v3.VListItem(
+                                v_if=("inv_view_model_info.avg_voxel_error",)
+                            ):
+                                with v3.VListItemTitle():
+                                    html.Span(
+                                        "{{ inv_view_model_info.is_kfold ? 'Avg Voxel Error: ' : 'Voxel Error: ' }}"
+                                    )
+                                    html.Strong(
+                                        "{{ inv_view_model_info.avg_voxel_error.toExponential(4) }}",
+                                        classes="text-primary",
+                                    )
+
                             # Training duration
                             with v3.VListItem(
                                 v_if=("inv_view_model_info.training_duration",)
@@ -3405,7 +4907,7 @@ class InverseModelsPage:
                                             classes="text-right",
                                         )
 
-            # Right side: Training history chart
+            # Right side: Training history chart and architecture visualization
             with v3.VCol(cols=12, md=5):
                 html.Div("Training History", classes="text-subtitle-1 mb-2")
                 with v3.VSheet(
@@ -3415,6 +4917,19 @@ class InverseModelsPage:
                 ):
                     self.view_loss_chart_widget = mpl_widgets.Figure(figure=None)
                     self.view_loss_chart_widget.update(plt.figure(figsize=(8, 4)))
+
+                # Network Architecture Visualization
+                html.Div(
+                    "Network Architecture",
+                    classes="text-subtitle-1 mb-2 mt-4",
+                )
+                with v3.VSheet(
+                    rounded=True,
+                    classes="d-flex align-center justify-center",
+                    style="min-height: 200px;",
+                ):
+                    self.view_network_arch_widget = mpl_widgets.Figure(figure=None)
+                    self.view_network_arch_widget.update(plt.figure(figsize=(10, 4)))
 
     def _build_test_tab(self):
         """Build the Test tab content."""

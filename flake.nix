@@ -117,6 +117,9 @@
 
           # Additional tools
           pkgs.git
+
+          # PDF tools (for PlotNeuralNet visualization)
+          pkgs.poppler-utils
         ];
 
         shellHook = ''
