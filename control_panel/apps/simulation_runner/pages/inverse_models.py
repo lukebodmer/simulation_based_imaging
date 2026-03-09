@@ -96,23 +96,23 @@ class InverseModelsPage:
         self.state.inv_downsample_factor = 2  # Downsample sensor data by this factor
 
         # MLP architecture configuration
-        self.state.inv_mlp_hidden_layers = "4096, 2048, 1024"  # Comma-separated sizes
-        self.state.inv_mlp_dropout = 0.2
+        self.state.inv_mlp_hidden_layers = "8192, 4096, 2048, 1024"  # Comma-separated sizes
+        self.state.inv_mlp_dropout = 0.5
 
         # CNN architecture configuration (shared by 1D and 2D CNN)
-        self.state.inv_cnn_conv_channels = "32, 64"  # Comma-separated channel sizes
+        self.state.inv_cnn_conv_channels = "64, 128"  # Comma-separated channel sizes
         self.state.inv_cnn_pool_size = 16
         self.state.inv_cnn_regressor_hidden = 512
-        self.state.inv_cnn_dropout = 0.2
+        self.state.inv_cnn_dropout = 0.5
         self.state.inv_cnn_use_residual = True  # Use residual blocks after conv layers
 
         # 2D CNN specific configuration
         self.state.inv_cnn2d_pool_height = 12  # Preserve sensor resolution
-        self.state.inv_cnn2d_pool_width = 8
+        self.state.inv_cnn2d_pool_width = 24  # Preserve temporal resolution
         self.state.inv_cnn2d_kernel_height = 3  # Small sensor kernel
-        self.state.inv_cnn2d_kernel_width = 11  # Wide time kernel for wave patterns
+        self.state.inv_cnn2d_kernel_width = 5  # Small time kernel
         self.state.inv_cnn2d_stride_height = 1  # Preserve sensor resolution
-        self.state.inv_cnn2d_stride_width = 2  # Downsample time
+        self.state.inv_cnn2d_stride_width = 3  # Aggressive time downsampling
 
         # Training options
         self.state.inv_early_stopping = False
