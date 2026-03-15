@@ -89,14 +89,23 @@ class InverseModelsPage:
         self.state.inv_batch_size = 16
         self.state.inv_learning_rate = 0.0001
         self.state.inv_voxel_grid_size = (
-            64  # Voxel grid resolution (grid_size^3 voxels)
+            32  # Voxel grid resolution (grid_size^3 voxels)
         )
-        self.state.inv_use_kspace = True  # Use k-space representation (FFT of voxels)
+        self.state.inv_use_kspace = False  # Use k-space representation (FFT of voxels)
+        # Output target options
+        self.state.inv_output_property = "density"  # "density" or "bulk_modulus"
+        self.state.inv_output_property_options = [
+            {"value": "density", "title": "Density"},
+            {"value": "bulk_modulus", "title": "Bulk Modulus (speed² × density)"},
+        ]
+        self.state.inv_output_scale = 1.0  # Multiply output values by this factor
         self.state.inv_trim_timesteps = 45  # Skip this many initial timesteps
-        self.state.inv_downsample_factor = 2  # Downsample sensor data by this factor
+        self.state.inv_downsample_factor = 4  # Downsample sensor data by this factor
 
         # MLP architecture configuration
-        self.state.inv_mlp_hidden_layers = "8192, 4096, 2048, 1024"  # Comma-separated sizes
+        self.state.inv_mlp_hidden_layers = (
+            "8192, 4096, 2048, 1024"  # Comma-separated sizes
+        )
         self.state.inv_mlp_dropout = 0.5
 
         # CNN architecture configuration (shared by 1D and 2D CNN)
@@ -115,7 +124,7 @@ class InverseModelsPage:
         self.state.inv_cnn2d_stride_width = 3  # Aggressive time downsampling
 
         # Training options
-        self.state.inv_early_stopping = False
+        self.state.inv_early_stopping = True
         self.state.inv_early_stopping_patience = 50
         self.state.inv_kfold_validation = False
         self.state.inv_kfold_k = 5
@@ -136,12 +145,14 @@ class InverseModelsPage:
         self.state.inv_active_sensor_count = 0  # Updated when batch loaded
         self.state.inv_total_sensor_count = 0  # Total sensors in batch
         self.state.inv_sensor_active_list = []  # List of booleans for UI binding
-        self.state.inv_sensors_by_face = []  # List of {face, label, sensors: [{idx, active}]}
-        self.state.inv_sensor_grid = []  # Grid layout matching unfolded cube for UI
         self.state.inv_sensor_grid_size = (
             0  # Number of sensors per row/col on each face
         )
         self.state.inv_sensor_sync_faces = False  # Apply changes to all faces at once
+        # Face-by-face selector state
+        self.state.inv_selected_face = "x_neg"  # Currently selected face for editing
+        self.state.inv_face_options = []  # List of {value, title} for dropdown
+        self.state.inv_current_face_grid = []  # Grid for currently selected face
         self._sensor_locations = None  # Cached sensor locations (num_sensors, 3)
         self._sensor_face_indices = {}  # Maps face name -> list of sensor indices
         self._sensor_grid_map = {}  # Maps (face, row, col) -> sensor index
@@ -189,6 +200,9 @@ class InverseModelsPage:
         self.state.inv_view_available_models = []
         self.state.inv_view_selected_model = ""
         self.state.inv_view_model_info = {}
+        self.state.inv_view_sensor_indices = []  # Active sensor indices from loaded model
+        self.state.inv_view_total_sensors = 0  # Total sensors in the model's batch
+        self.view_sensor_cube_widget = None  # Matplotlib widget for view tab sensor viz
 
         # Test tab state
         self.state.inv_test_available_batches = []
@@ -245,6 +259,10 @@ class InverseModelsPage:
         self.state.change("inv_downsample_factor")(self._on_input_output_changed)
         self.state.change("inv_voxel_grid_size")(self._on_input_output_changed)
         self.state.change("inv_use_kspace")(self._on_input_output_changed)
+        self.state.change("inv_output_property")(self._on_input_output_changed)
+        self.state.change("inv_output_scale")(self._on_input_output_changed)
+        # Sensor face selector handler
+        self.state.change("inv_selected_face")(self._on_face_selection_changed)
         # View tab handlers
         self.state.change("inv_view_selected_batch")(self._on_view_batch_selected)
         self.state.change("inv_view_selected_model")(self._on_view_model_selected)
@@ -328,11 +346,12 @@ class InverseModelsPage:
         self._sensor_face_indices = {}
         self._sensor_grid_map = {}
         self.state.inv_sensor_active_list = []
-        self.state.inv_sensors_by_face = []
-        self.state.inv_sensor_grid = []
         self.state.inv_sensor_grid_size = 0
         self.state.inv_total_sensor_count = 0
         self.state.inv_active_sensor_count = 0
+        self.state.inv_selected_face = "x_neg"
+        self.state.inv_face_options = []
+        self.state.inv_current_face_grid = []
 
         if not inv_selected_batch:
             self.state.inv_compression_preview_label = ""
@@ -427,6 +446,8 @@ class InverseModelsPage:
             self.state.inv_sensor_active_list = [True] * len(self._sensor_locations)
             # Build grid map for UI
             self._build_sensor_grid_map()
+            # Initialize face selector
+            self._update_face_options()
             self._update_active_sensor_count()
             logger.info(
                 f"Loaded {len(self._sensor_locations)} sensor locations, "
@@ -605,17 +626,12 @@ class InverseModelsPage:
         """Update the active sensor count based on individual sensor selection."""
         active_indices = self._get_active_sensor_indices()
         self.state.inv_active_sensor_count = len(active_indices)
-        self._update_sensors_by_face()
-        self._update_sensor_grid()
+        self._update_current_face_grid()
         self._update_sensor_cube_visualization()
         self._update_input_output_sizes()
 
-    def _update_sensors_by_face(self):
-        """Update the sensors-by-face structure for UI display.
-
-        Sensors are sorted by their grid position (row-major order) to match
-        the visualization.
-        """
+    def _update_face_options(self):
+        """Update the face dropdown options based on available faces."""
         face_labels = {
             "x_neg": "X- Face",
             "x_pos": "X+ Face",
@@ -626,61 +642,142 @@ class InverseModelsPage:
         }
         face_order = ["x_neg", "x_pos", "y_neg", "y_pos", "z_neg", "z_pos"]
 
-        sensor_list = self.state.inv_sensor_active_list
-        grid_size = self.state.inv_sensor_grid_size
-        result = []
-
+        options = []
         for face_name in face_order:
-            if face_name not in self._sensor_face_indices:
-                continue
-            indices = self._sensor_face_indices[face_name]
-            if not indices:
-                continue
+            if (
+                face_name in self._sensor_face_indices
+                and self._sensor_face_indices[face_name]
+            ):
+                options.append(
+                    {"value": face_name, "title": face_labels.get(face_name, face_name)}
+                )
 
-            # Sort sensors by grid position (row, col) to match visualization
-            if self._sensor_locations is not None and grid_size > 0:
-                locs = self._sensor_locations[indices]
+        self.state.inv_face_options = options
 
-                # Project 3D coords to 2D based on face
-                if face_name in ("x_neg", "x_pos"):
-                    u, v = locs[:, 1], locs[:, 2]
-                elif face_name in ("y_neg", "y_pos"):
-                    u, v = locs[:, 0], locs[:, 2]
-                else:  # z_neg, z_pos
-                    u, v = locs[:, 0], locs[:, 1]
+        # Ensure selected face is valid
+        valid_faces = [opt["value"] for opt in options]
+        if self.state.inv_selected_face not in valid_faces and valid_faces:
+            self.state.inv_selected_face = valid_faces[0]
 
-                # Compute grid positions and sort by (row, col)
-                sensor_positions = []
-                for i, idx in enumerate(indices):
-                    col = int(np.clip(u[i] * grid_size, 0, grid_size - 1))
-                    row = int(np.clip((1 - v[i]) * grid_size, 0, grid_size - 1))
-                    sensor_positions.append((row, col, idx))
+    def _on_face_selection_changed(self, inv_selected_face, **kwargs):
+        """Handle face selection change from dropdown."""
+        self._update_current_face_grid()
+        self._update_sensor_cube_visualization()
 
-                # Sort by row then column (row-major order)
-                sensor_positions.sort(key=lambda x: (x[0], x[1]))
-                sorted_indices = [sp[2] for sp in sensor_positions]
-            else:
-                sorted_indices = sorted(indices)
+    def _update_current_face_grid(self):
+        """Update the grid for the currently selected face.
 
-            sensors = []
-            for idx in sorted_indices:
-                active = sensor_list[idx] if idx < len(sensor_list) else True
-                sensors.append({"idx": idx, "active": active})
+        Creates a grid structure that includes empty cells where sensors don't
+        exist (e.g., center of a 5x5 grid). This allows the UI to render the
+        sensors in their correct spatial positions.
+        """
+        face_name = self.state.inv_selected_face
+        sensor_list = self.state.inv_sensor_active_list
 
-            result.append(
-                {
-                    "face": face_name,
-                    "label": face_labels.get(face_name, face_name),
-                    "sensors": sensors,
-                }
+        # Compute grid size directly from sensor count for this face
+        if face_name not in self._sensor_face_indices:
+            self.state.inv_current_face_grid = []
+            return
+
+        indices = self._sensor_face_indices[face_name]
+        if not indices:
+            self.state.inv_current_face_grid = []
+            return
+
+        grid_size = self._infer_grid_size(len(indices))
+        if grid_size == 0:
+            self.state.inv_current_face_grid = []
+            return
+
+        # Build a map from (row, col) to sensor index for this face
+        position_to_sensor = {}
+        if self._sensor_locations is not None:
+            locs = self._sensor_locations[indices]
+
+            # Project 3D coords to 2D based on face
+            if face_name in ("x_neg", "x_pos"):
+                u, v = locs[:, 1], locs[:, 2]
+            elif face_name in ("y_neg", "y_pos"):
+                u, v = locs[:, 0], locs[:, 2]
+            else:  # z_neg, z_pos
+                u, v = locs[:, 0], locs[:, 1]
+
+            # Map each sensor to its grid position
+            # Log sensor positions to understand the coordinate system
+            logger.debug(
+                f"Face {face_name}: grid_size={grid_size}, "
+                f"u range=[{u.min():.3f}, {u.max():.3f}], "
+                f"v range=[{v.min():.3f}, {v.max():.3f}]"
             )
+            for i, idx in enumerate(indices):
+                # Determine mapping based on coordinate range
+                # If coords span [0,1], use grid_size; if centered, use grid_size-1
+                u_min, u_max = u.min(), u.max()
+                v_min, v_max = v.min(), v.max()
 
-        self.state.inv_sensors_by_face = result
+                # Normalize to [0, 1] range based on actual min/max
+                if u_max > u_min:
+                    u_norm = (u[i] - u_min) / (u_max - u_min)
+                else:
+                    u_norm = 0.5
+                if v_max > v_min:
+                    v_norm = (v[i] - v_min) / (v_max - v_min)
+                else:
+                    v_norm = 0.5
+
+                col = int(round(u_norm * (grid_size - 1)))
+                row = int(round((1 - v_norm) * (grid_size - 1)))
+                col = max(0, min(col, grid_size - 1))
+                row = max(0, min(row, grid_size - 1))
+                position_to_sensor[(row, col)] = idx
+
+        # Build grid as list of rows, each row is a list of cells
+        grid = []
+        for row in range(grid_size):
+            row_cells = []
+            for col in range(grid_size):
+                if (row, col) in position_to_sensor:
+                    idx = position_to_sensor[(row, col)]
+                    active = sensor_list[idx] if idx < len(sensor_list) else True
+                    row_cells.append({"idx": idx, "active": active, "empty": False})
+                else:
+                    # Empty cell (no sensor at this position)
+                    row_cells.append({"idx": -1, "active": False, "empty": True})
+            grid.append(row_cells)
+
+        self.state.inv_current_face_grid = grid
+
+    def _infer_grid_size(self, num_sensors: int) -> int:
+        """Infer the grid size from the number of sensors on a face.
+
+        Handles special cases like NxN-minus-center patterns (e.g., 24 sensors
+        for a 5x5 grid missing the center sensor).
+
+        Args:
+            num_sensors: Number of sensors on a face.
+
+        Returns:
+            The grid size (number of rows/columns).
+        """
+        # Check for perfect square first
+        sqrt_n = int(np.sqrt(num_sensors))
+        if sqrt_n * sqrt_n == num_sensors:
+            return sqrt_n
+
+        # Check for NxN minus center pattern (N must be odd)
+        # For odd N: N*N - 1 sensors (missing center)
+        # E.g., 5x5 - 1 = 24, 7x7 - 1 = 48
+        for n in range(3, 20, 2):  # Check odd sizes 3, 5, 7, ...
+            if n * n - 1 == num_sensors:
+                return n
+
+        # Fallback: use floor of sqrt (old behavior)
+        return sqrt_n
 
     def _build_sensor_grid_map(self):
         """Build mapping from (face, row, col) to sensor index.
 
-        Assumes sensors on each face form a square grid.
+        Handles both perfect square grids and NxN-minus-center patterns.
         """
         self._sensor_grid_map = {}
 
@@ -691,7 +788,7 @@ class InverseModelsPage:
         # Determine grid size from first face with sensors
         for face_name, indices in self._sensor_face_indices.items():
             if indices:
-                grid_size = int(np.sqrt(len(indices)))
+                grid_size = self._infer_grid_size(len(indices))
                 self.state.inv_sensor_grid_size = grid_size
                 break
         else:
@@ -715,12 +812,26 @@ class InverseModelsPage:
                 u, v = locs[:, 0], locs[:, 1]
 
             # Map each sensor to grid position
+            # Normalize coordinates based on actual min/max to handle any spacing
+            u_min, u_max = u.min(), u.max()
+            v_min, v_max = v.min(), v.max()
+
             for i, idx in enumerate(indices):
-                # Convert normalized coords to grid row/col
-                col = int(np.clip(u[i] * grid_size, 0, grid_size - 1))
+                if u_max > u_min:
+                    u_norm = (u[i] - u_min) / (u_max - u_min)
+                else:
+                    u_norm = 0.5
+                if v_max > v_min:
+                    v_norm = (v[i] - v_min) / (v_max - v_min)
+                else:
+                    v_norm = 0.5
+
+                col = int(round(u_norm * (grid_size - 1)))
                 row = int(
-                    np.clip((1 - v[i]) * grid_size, 0, grid_size - 1)
+                    round((1 - v_norm) * (grid_size - 1))
                 )  # Flip v for top-to-bottom
+                col = max(0, min(col, grid_size - 1))
+                row = max(0, min(row, grid_size - 1))
                 self._sensor_grid_map[(face_name, row, col)] = idx
 
     def _update_sensor_grid(self):
@@ -944,29 +1055,32 @@ class InverseModelsPage:
 
         from matplotlib.patches import Rectangle
 
-        # Draw face rectangles with neutral background
+        selected_face = self.state.inv_selected_face
+
+        # Draw face rectangles - highlight the selected face
         for face_name, (gx, gy) in face_positions.items():
+            is_selected = face_name == selected_face
             rect = Rectangle(
                 (gx, gy),
                 1,
                 1,
-                facecolor="#E0E0E0",
-                edgecolor="#9E9E9E",
-                linewidth=1.5,
-                alpha=0.8,
+                facecolor="#BBDEFB" if is_selected else "#E0E0E0",
+                edgecolor="#1976D2" if is_selected else "#9E9E9E",
+                linewidth=2.5 if is_selected else 1.5,
+                alpha=0.9 if is_selected else 0.8,
             )
             ax.add_patch(rect)
 
-            # Add face label (subtle, in corner)
+            # Add face label (bolder for selected face)
             ax.text(
                 gx + 0.08,
                 gy + 0.92,
                 face_labels[face_name],
                 ha="left",
                 va="top",
-                fontsize=8,
+                fontsize=9 if is_selected else 8,
                 fontweight="bold",
-                color="#757575",
+                color="#1565C0" if is_selected else "#757575",
             )
 
         # Draw sensor dots with individual active/inactive states
@@ -1235,6 +1349,8 @@ class InverseModelsPage:
     def _on_view_model_selected(self, inv_view_selected_model, **kwargs):
         """Handle model selection in view tab - load and display model info."""
         self.state.inv_view_model_info = {}
+        self.state.inv_view_sensor_indices = []
+        self.state.inv_view_total_sensors = 0
 
         # Clear both regular and K-fold history
         self._loss_epochs = []
@@ -1247,6 +1363,7 @@ class InverseModelsPage:
         if not inv_view_selected_model or not self.state.inv_view_selected_batch:
             self._update_view_loss_chart()
             self._update_view_network_arch_visualization()
+            self._update_view_sensor_visualization()
             return
 
         model_dir = (
@@ -1270,12 +1387,30 @@ class InverseModelsPage:
                 logger.warning(f"Model not found: {inv_view_selected_model}")
                 self._update_view_loss_chart()
                 self._update_view_network_arch_visualization()
+                self._update_view_sensor_visualization()
                 return
 
             # Extract model info
             model_info = self._extract_model_info(data)
             model_info["batch_name"] = self.state.inv_view_selected_batch
             self.state.inv_view_model_info = model_info
+
+            # Extract sensor configuration from preprocessing_config
+            preproc_config = data.get("preprocessing_config", {})
+            sensor_indices = preproc_config.get("sensor_indices", [])
+            num_sensors = preproc_config.get("num_sensors", len(sensor_indices))
+            self.state.inv_view_sensor_indices = sensor_indices
+            # Try to get total sensor count - if not available, estimate from batch
+            batch_path = DEFAULT_DATA_DIR / self.state.inv_view_selected_batch
+            batch_sensor_locs = self._load_sensor_locations(batch_path)
+            if batch_sensor_locs is not None:
+                self.state.inv_view_total_sensors = len(batch_sensor_locs)
+            else:
+                # Fallback: assume all sensors were used if no indices specified
+                self.state.inv_view_total_sensors = num_sensors if sensor_indices else 0
+
+            # Update sensor visualization
+            self._update_view_sensor_visualization()
 
             # Load and display training history
             history = data.get("training_history", {})
@@ -2371,6 +2506,155 @@ class InverseModelsPage:
             self.view_network_arch_widget.update(fig)
             plt.close(fig)
 
+    def _update_view_sensor_visualization(self):
+        """Update the sensor visualization in the View tab based on loaded model data."""
+        if self.view_sensor_cube_widget is None:
+            return
+
+        sensor_indices = self.state.inv_view_sensor_indices
+        total_sensors = self.state.inv_view_total_sensors
+        batch_name = self.state.inv_view_selected_batch
+
+        # If no sensor data, show placeholder
+        if not sensor_indices or total_sensors == 0:
+            fig, ax = plt.subplots(figsize=(4, 3))
+            ax.text(
+                0.5,
+                0.5,
+                "No sensor data available",
+                ha="center",
+                va="center",
+                fontsize=10,
+                color="gray",
+            )
+            ax.axis("off")
+            self.view_sensor_cube_widget.update(fig)
+            plt.close(fig)
+            return
+
+        # Load sensor locations from the batch
+        batch_path = DEFAULT_DATA_DIR / batch_name
+        sensor_locations = self._load_sensor_locations(batch_path)
+        if sensor_locations is None:
+            fig, ax = plt.subplots(figsize=(4, 3))
+            ax.text(
+                0.5,
+                0.5,
+                "Could not load sensor locations",
+                ha="center",
+                va="center",
+                fontsize=10,
+                color="gray",
+            )
+            ax.axis("off")
+            self.view_sensor_cube_widget.update(fig)
+            plt.close(fig)
+            return
+
+        # Classify sensors by face
+        face_indices = self._classify_sensors_by_face(sensor_locations)
+
+        # Create active list based on model's sensor_indices
+        active_set = set(sensor_indices)
+
+        fig, ax = plt.subplots(figsize=(4, 3))
+        ax.set_aspect("equal")
+        ax.axis("off")
+
+        face_positions = {
+            "z_pos": (1, 2),
+            "x_neg": (0, 1),
+            "y_neg": (1, 1),
+            "x_pos": (2, 1),
+            "y_pos": (3, 1),
+            "z_neg": (1, 0),
+        }
+
+        face_labels = {
+            "x_neg": "X-",
+            "x_pos": "X+",
+            "y_neg": "Y-",
+            "y_pos": "Y+",
+            "z_neg": "Z-",
+            "z_pos": "Z+",
+        }
+
+        from matplotlib.patches import Rectangle
+
+        # Draw face rectangles
+        for face_name, (gx, gy) in face_positions.items():
+            rect = Rectangle(
+                (gx, gy),
+                1,
+                1,
+                facecolor="#E0E0E0",
+                edgecolor="#9E9E9E",
+                linewidth=1.5,
+                alpha=0.8,
+            )
+            ax.add_patch(rect)
+
+            ax.text(
+                gx + 0.08,
+                gy + 0.92,
+                face_labels.get(face_name, face_name),
+                ha="left",
+                va="top",
+                fontsize=8,
+                fontweight="bold",
+                color="#757575",
+            )
+
+        # Draw sensor dots
+        for face_name, (gx, gy) in face_positions.items():
+            if face_name not in face_indices:
+                continue
+
+            indices = face_indices[face_name]
+            if not indices:
+                continue
+
+            locs = sensor_locations[indices]
+
+            # Project 3D coords to 2D based on face
+            if face_name in ("x_neg", "x_pos"):
+                u, v = locs[:, 1], locs[:, 2]
+            elif face_name in ("y_neg", "y_pos"):
+                u, v = locs[:, 0], locs[:, 2]
+            else:  # z_neg, z_pos
+                u, v = locs[:, 0], locs[:, 1]
+
+            for i, idx in enumerate(indices):
+                sx = gx + u[i] * 0.8 + 0.1
+                sy = gy + v[i] * 0.8 + 0.1
+                is_active = idx in active_set
+                dot_color = "#4CAF50" if is_active else "#BDBDBD"
+                edge_color = "#2E7D32" if is_active else "#9E9E9E"
+
+                ax.scatter(
+                    sx,
+                    sy,
+                    c=dot_color,
+                    s=25,
+                    alpha=0.9,
+                    edgecolors=edge_color,
+                    linewidths=0.5,
+                )
+
+        ax.set_xlim(-0.1, 4.1)
+        ax.set_ylim(-0.1, 3.1)
+
+        # Add title with sensor count
+        ax.set_title(
+            f"Sensors: {len(sensor_indices)} of {total_sensors} active",
+            fontsize=9,
+            pad=2,
+        )
+
+        fig.tight_layout(pad=0.1)
+        self.view_sensor_cube_widget.update(fig)
+        plt.close(fig)
+
     def _update_network_arch_visualization(self):
         """Update the network architecture visualization using PlotNeuralNet.
 
@@ -2573,6 +2857,25 @@ class InverseModelsPage:
         try:
             self._log(f"Training inverse model for batch: {batch_name}")
             self._log(f"Model type: {self.state.inv_model_type}")
+
+            # Log sensor configuration
+            active_indices = self._get_active_sensor_indices()
+            total_sensors = len(self.state.inv_sensor_active_list)
+            self._log(f"Using {len(active_indices)} of {total_sensors} sensors")
+            self._log(f"Active sensor indices: {active_indices}")
+
+            # Also print to console for easy reference
+            print("\n" + "=" * 60)
+            print("SENSOR CONFIGURATION FOR TRAINING")
+            print("=" * 60)
+            print(f"Batch: {batch_name}")
+            print(f"Total sensors: {total_sensors}")
+            print(f"Active sensors: {len(active_indices)}")
+            print(f"Active sensor indices: {active_indices}")
+            print(
+                f"Inactive sensor indices: {[i for i in range(total_sensors) if i not in active_indices]}"
+            )
+            print("=" * 60 + "\n")
 
             # Check if training data exists
             await asyncio.sleep(0)
@@ -2788,6 +3091,8 @@ class InverseModelsPage:
             "noise_level": float(self.state.inv_noise_level),
             "voxel_grid_size": int(self.state.inv_voxel_grid_size),
             "use_kspace": bool(self.state.inv_use_kspace),
+            "output_property": str(self.state.inv_output_property),
+            "output_scale": float(self.state.inv_output_scale),
             "sensor_indices": active_sensor_indices,  # Empty list means use all sensors
         }
 
@@ -3063,6 +3368,8 @@ class InverseModelsPage:
         config_file: Path,
         grid_size: int | None = None,
         use_kspace: bool | None = None,
+        output_property: str | None = None,
+        output_scale: float | None = None,
     ):
         """Convert config parameters to target representation (k-space or voxels).
 
@@ -3071,9 +3378,11 @@ class InverseModelsPage:
             grid_size: Voxel grid resolution. Defaults to state value.
             use_kspace: If True, return k-space (FFT). If False, return raw voxels.
                        Defaults to state value.
+            output_property: "density" or "bulk_modulus". Defaults to state value.
+            output_scale: Multiply output values by this factor.
 
         Returns:
-            Flattened array: k-space [real, imag] or voxel densities.
+            Flattened array: k-space [real, imag] or voxel values.
         """
         import tomli
 
@@ -3081,6 +3390,10 @@ class InverseModelsPage:
             grid_size = int(self.state.inv_voxel_grid_size)
         if use_kspace is None:
             use_kspace = bool(self.state.inv_use_kspace)
+        if output_property is None:
+            output_property = str(self.state.inv_output_property)
+        if output_scale is None:
+            output_scale = float(self.state.inv_output_scale)
 
         with open(config_file, "rb") as f:
             config = tomli.load(f)
@@ -3092,6 +3405,18 @@ class InverseModelsPage:
         cube_centers = mesh_cfg.get("cube_centers", [])
         cube_widths = mesh_cfg.get("cube_widths", [])
         density = material_cfg.get("inclusion_density", 2.0)
+        speed = material_cfg.get("inclusion_speed", 1.0)
+
+        # Compute the voxel value based on selected property
+        if output_property == "bulk_modulus":
+            # Bulk modulus = speed² × density
+            voxel_value = (speed**2) * density
+        else:
+            # Default to density
+            voxel_value = density
+
+        # Apply output scaling
+        voxel_value *= output_scale
 
         # Create voxel grid
         grid = np.zeros((grid_size, grid_size, grid_size), dtype=np.float32)
@@ -3110,7 +3435,7 @@ class InverseModelsPage:
                     & (np.abs(Y - cy) <= hw)
                     & (np.abs(Z - cz) <= hw)
                 )
-                grid[mask] = density
+                grid[mask] = voxel_value
 
         if use_kspace:
             # Compute FFT and return k-space representation
@@ -3123,7 +3448,7 @@ class InverseModelsPage:
 
             return np.concatenate([real_part, imag_part]).astype(np.float32)
         else:
-            # Return raw voxel densities
+            # Return raw voxel values
             return grid.flatten().astype(np.float32)
 
     def _load_training_data(
@@ -3604,6 +3929,8 @@ class InverseModelsPage:
                 "use_normalization": bool(self.state.inv_use_normalization),
                 "use_noise": bool(self.state.inv_use_noise),
                 "noise_level": float(self.state.inv_noise_level),
+                "output_property": str(self.state.inv_output_property),
+                "output_scale": float(self.state.inv_output_scale),
                 "sensor_indices": self._get_active_sensor_indices(),
                 "num_sensors": self._get_num_active_sensors(),
             },
@@ -3705,6 +4032,8 @@ class InverseModelsPage:
                 "use_normalization": bool(self.state.inv_use_normalization),
                 "use_noise": bool(self.state.inv_use_noise),
                 "noise_level": float(self.state.inv_noise_level),
+                "output_property": str(self.state.inv_output_property),
+                "output_scale": float(self.state.inv_output_scale),
                 "sensor_indices": self._get_active_sensor_indices(),
                 "num_sensors": self._get_num_active_sensors(),
             },
@@ -4029,6 +4358,28 @@ class InverseModelsPage:
                             persistent_hint=True,
                         )
 
+                # Output target options
+                with v3.VRow(dense=True, classes="mt-2"):
+                    with v3.VCol(cols=4):
+                        v3.VSelect(
+                            v_model=("inv_output_property",),
+                            items=("inv_output_property_options",),
+                            label="Output Property",
+                            density="compact",
+                            hint="What to predict",
+                            persistent_hint=True,
+                        )
+                    with v3.VCol(cols=3):
+                        v3.VTextField(
+                            v_model=("inv_output_scale",),
+                            label="Output Scale",
+                            type="number",
+                            step="0.1",
+                            density="compact",
+                            hint="Multiply output by",
+                            persistent_hint=True,
+                        )
+
                 # === MLP ARCHITECTURE SECTION ===
                 with html.Div(v_show=("inv_model_type === 'nn_mlp'",)):
                     v3.VDivider(classes="my-3")
@@ -4315,7 +4666,7 @@ class InverseModelsPage:
                 v3.VDivider(classes="my-3")
                 html.Div("Sensors", classes="text-subtitle-2 mb-2")
                 with v3.VRow(dense=True):
-                    # Left side: grid of sensor checkboxes by face
+                    # Left side: face selector and grid
                     with v3.VCol(cols=5):
                         # Sensor count summary at top
                         with html.Div(classes="text-caption mb-2"):
@@ -4345,46 +4696,61 @@ class InverseModelsPage:
                             label="Sync across faces",
                             density="compact",
                             hide_details=True,
-                            classes="mt-0 mb-1",
+                            classes="mt-0 mb-2",
                         )
 
-                        # Scrollable container with sensors grouped by face as grids
+                        # Face selector dropdown
+                        v3.VSelect(
+                            v_model=("inv_selected_face",),
+                            items=("inv_face_options",),
+                            label="Select Face",
+                            density="compact",
+                            hide_details=True,
+                            classes="mb-2",
+                            v_show=("inv_total_sensor_count > 0",),
+                        )
+
+                        # Grid for selected face
                         with html.Div(
                             v_show=("inv_total_sensor_count > 0",),
-                            style="max-height: 250px; overflow-y: auto;",
-                            classes="border rounded pa-1",
+                            classes="border rounded pa-2 d-flex justify-center",
                         ):
-                            # Iterate over faces
-                            with html.Div(
-                                v_for="faceGroup in inv_sensors_by_face",
-                                key=("faceGroup.face",),
-                                classes="mb-2",
-                            ):
-                                # Face header
-                                html.Div(
-                                    "{{ faceGroup.label }}",
-                                    classes="text-caption font-weight-bold bg-grey-lighten-3 px-2 py-1",
-                                )
-                                # Sensor grid for this face
+                            # Grid container with rows
+                            with html.Div():
+                                # Each row
                                 with html.Div(
-                                    style=(
-                                        "`display: grid; grid-template-columns: repeat(${inv_sensor_grid_size}, 20px); gap: 2px; padding: 4px;`",
-                                    ),
+                                    v_for="(row, rowIdx) in inv_current_face_grid",
+                                    key=("rowIdx",),
+                                    style="display: flex; gap: 4px; margin-bottom: 4px;",
                                 ):
-                                    # Each sensor as a clickable cell
+                                    # Each cell in the row
                                     with html.Div(
-                                        v_for="sensor in faceGroup.sensors",
-                                        key=("sensor.idx",),
-                                        style="width: 18px; height: 18px; cursor: pointer; display: flex; align-items: center; justify-content: center;",
-                                        click=(self._toggle_sensor, "[sensor.idx]"),
+                                        v_for="(cell, colIdx) in row",
+                                        key=("`${rowIdx}_${colIdx}`",),
+                                        style=(
+                                            "cell.empty ? "
+                                            "'width: 28px; height: 28px; display: flex; align-items: center; justify-content: center;' : "
+                                            "'width: 28px; height: 28px; cursor: pointer; display: flex; align-items: center; justify-content: center;'",
+                                        ),
+                                        click=(
+                                            self._toggle_sensor,
+                                            "[cell.empty ? -1 : cell.idx]",
+                                        ),
                                     ):
+                                        # Empty cell (no sensor)
                                         html.Div(
-                                            v_if=("sensor.active",),
-                                            style="width: 14px; height: 14px; background-color: #4CAF50; border-radius: 2px;",
+                                            v_if=("cell.empty",),
+                                            style="width: 24px; height: 24px; background-color: #F5F5F5; border-radius: 4px; border: 1px dashed #BDBDBD;",
                                         )
+                                        # Active sensor
+                                        html.Div(
+                                            v_else_if=("cell.active",),
+                                            style="width: 24px; height: 24px; background-color: #4CAF50; border-radius: 4px; border: 2px solid #2E7D32;",
+                                        )
+                                        # Inactive sensor
                                         html.Div(
                                             v_else=True,
-                                            style="width: 14px; height: 14px; background-color: #E0E0E0; border-radius: 2px; border: 1px solid #BDBDBD;",
+                                            style="width: 24px; height: 24px; background-color: #E0E0E0; border-radius: 4px; border: 2px solid #9E9E9E;",
                                         )
 
                     # Right side: unfolded cube visualization
@@ -4930,6 +5296,19 @@ class InverseModelsPage:
                 ):
                     self.view_network_arch_widget = mpl_widgets.Figure(figure=None)
                     self.view_network_arch_widget.update(plt.figure(figsize=(10, 4)))
+
+                # Sensor Configuration Visualization
+                html.Div(
+                    "Sensor Configuration",
+                    classes="text-subtitle-1 mb-2 mt-4",
+                )
+                with v3.VSheet(
+                    rounded=True,
+                    classes="d-flex align-center justify-center",
+                    style="min-height: 180px;",
+                ):
+                    self.view_sensor_cube_widget = mpl_widgets.Figure(figure=None)
+                    self.view_sensor_cube_widget.update(plt.figure(figsize=(4, 3)))
 
     def _build_test_tab(self):
         """Build the Test tab content."""

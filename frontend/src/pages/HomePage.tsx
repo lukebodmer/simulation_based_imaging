@@ -6,11 +6,9 @@ import { VoxelComparisonCarousel } from "../components/VoxelComparisonCarousel";
 
 const sections = [
   { id: "hero", title: "Introduction" },
-  { id: "history", title: "History" },
   { id: "1d-example", title: "1D Example" },
   { id: "2d-example", title: "2D Example" },
   { id: "3d-example", title: "3D Example" },
-  { id: "results", title: "Results" },
   { id: "conclusion", title: "Conclusion" },
 ];
 
@@ -179,7 +177,7 @@ export function HomePage() {
 
   function handleGetStarted() {
     setNavCollapsed(false);
-    document.getElementById("history")?.scrollIntoView({ behavior: "smooth" });
+    document.getElementById("1d-example")?.scrollIntoView({ behavior: "smooth" });
   }
 
   useEffect(() => {
@@ -243,11 +241,6 @@ export function HomePage() {
           <button className={styles.getStartedButton} onClick={handleGetStarted}>
             Get Started
           </button>
-        </section>
-
-        <section id="history" className={styles.section}>
-          <h2 className={styles.sectionTitle}>History</h2>
-          <div className={styles.sectionContent}></div>
         </section>
 
         <section id="1d-example" className={styles.section}>
@@ -434,11 +427,6 @@ export function HomePage() {
             <h3 className={styles.subslideTitle}>Neural Network Results</h3>
             <VoxelComparisonCarousel />
           </div>
-        </section>
-
-        <section id="results" className={styles.section}>
-          <h2 className={styles.sectionTitle}>Results</h2>
-          <div className={styles.sectionContent}></div>
         </section>
 
         <section id="conclusion" className={styles.section}>

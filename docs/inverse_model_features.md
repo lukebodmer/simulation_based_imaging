@@ -320,3 +320,61 @@ To evaluate model robustness to measurement noise, we conducted a 5-fold cross-v
 | 10% | 5.25e-02 ± 1.92e-03 | 1.07e-01 ± 4.54e-03 | 2772.8 ± 75.6 |
 
 **Observation**: The model shows graceful degradation with noise. At 5% noise, voxel error increases by ~13% (2469 → 2783). Interestingly, 10% noise shows similar voxel error to 5% (2773 vs 2783), despite higher test loss. This suggests the model learns to be somewhat robust to noise beyond a threshold. The low standard deviations across folds indicate stable performance. Train loss remains relatively constant across noise levels, while test loss increases proportionally with noise — the model fits the noisy training data but generalizes worse on clean test data patterns.
+
+## Sensor Sparsity Study
+
+To understand the minimum sensor requirements and how sensor density affects reconstruction quality, we progressively reduced the number of active sensors using the optimized 2D CNN configuration.
+
+### Script
+
+```bash
+python -m sbimaging.scripts.study_sensor_sparsity --batch <batch_name>
+```
+
+### Methodology
+
+1. Use optimized 2D CNN parameters from hyperparameter sweep
+2. Start with full sensor coverage (144 sensors, 24 per face on 6 faces)
+3. Progressively reduce sensors and measure reconstruction quality
+4. Test both uniform reduction and random placement patterns
+5. Run 5-fold cross-validation for robust estimates
+
+### Results (5-Fold Cross-Validation)
+
+| Sensors | Coverage | Train Loss | Test Loss | Voxel Error |
+|---------|----------|------------|-----------|-------------|
+| 144/144 (100%) | Full | 5.14e-02 ± 1.39e-03 | 8.37e-02 ± 3.26e-03 | 2566.9 ± 111.3 |
+| 120/144 (83%) | Uniform sparse | 5.31e-02 ± 1.04e-03 | 8.42e-02 ± 3.22e-03 | 2685.5 ± 67.3 |
+| 72/144 (50%) | Checkerboard | 5.21e-02 ± 1.48e-03 | 8.45e-02 ± 3.27e-03 | 2564.1 ± 110.4 |
+| 48/144 (33%) | Sparse uniform | 5.30e-02 ± 1.31e-03 | 8.34e-02 ± 3.02e-03 | 2511.3 ± 73.4 |
+| 24/144 (17%) | Center of faces | 5.32e-02 ± 1.04e-03 | 8.48e-02 ± 3.19e-03 | 2544.3 ± 114.5 |
+
+**Key Finding**: Sensor density has minimal impact on reconstruction quality. All configurations achieve similar voxel error (~2500-2700), with no clear trend as sensors are reduced. The 48-sensor sparse configuration actually achieves the *lowest* voxel error (2511.3). This suggests:
+
+1. **High sensor redundancy**: The 144-sensor array contains significant redundant information for this inverse problem
+2. **Well-posed inverse problem**: Even sparse sensing provides sufficient information for reconstruction
+3. **Practical implications**: Hardware costs could be reduced by 67-83% with no performance loss
+
+The low standard deviations across folds indicate stable, reproducible results.
+
+### Sensor Configurations
+
+**144 sensors (100%)**: All sensors active.
+- Active: all 0-143
+- Inactive: none
+
+**120 sensors (83%)**: Uniform sparse (4 removed per face).
+- Active: [0, 1, 2, 3, 4, 5, 7, 9, 10, 11, 12, 13, 14, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 31, 33, 34, 35, 36, 37, 38, 40, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 55, 57, 58, 59, 60, 61, 62, 64, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 79, 81, 82, 83, 84, 85, 86, 88, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 103, 105, 106, 107, 108, 109, 110, 112, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 127, 129, 130, 131, 132, 133, 134, 136, 138, 139, 140, 141, 142, 143]
+- Inactive: [6, 8, 15, 17, 30, 32, 39, 41, 54, 56, 63, 65, 78, 80, 87, 89, 102, 104, 111, 113, 126, 128, 135, 137]
+
+**72 sensors (50%)**: Checkerboard pattern.
+- Active: [0, 2, 4, 6, 8, 10, 13, 15, 17, 19, 21, 23, 24, 26, 28, 30, 32, 34, 37, 39, 41, 43, 45, 47, 48, 50, 52, 54, 56, 58, 61, 63, 65, 67, 69, 71, 72, 74, 76, 78, 80, 82, 85, 87, 89, 91, 93, 95, 96, 98, 100, 102, 104, 106, 109, 111, 113, 115, 117, 119, 120, 122, 124, 126, 128, 130, 133, 135, 137, 139, 141, 143]
+- Inactive: [1, 3, 5, 7, 9, 11, 12, 14, 16, 18, 20, 22, 25, 27, 29, 31, 33, 35, 36, 38, 40, 42, 44, 46, 49, 51, 53, 55, 57, 59, 60, 62, 64, 66, 68, 70, 73, 75, 77, 79, 81, 83, 84, 86, 88, 90, 92, 94, 97, 99, 101, 103, 105, 107, 108, 110, 112, 114, 116, 118, 121, 123, 125, 127, 129, 131, 132, 134, 136, 138, 140, 142]
+
+**48 sensors (33%)**: Sparse uniform.
+- Active: [2, 6, 8, 10, 13, 15, 17, 21, 26, 30, 32, 34, 37, 39, 41, 45, 50, 54, 56, 58, 61, 63, 65, 69, 74, 78, 80, 82, 85, 87, 89, 93, 98, 102, 104, 106, 109, 111, 113, 117, 122, 126, 128, 130, 133, 135, 137, 141]
+- Inactive: [0, 1, 3, 4, 5, 7, 9, 11, 12, 14, 16, 18, 19, 20, 22, 23, 24, 25, 27, 28, 29, 31, 33, 35, 36, 38, 40, 42, 43, 44, 46, 47, 48, 49, 51, 52, 53, 55, 57, 59, 60, 62, 64, 66, 67, 68, 70, 71, 72, 73, 75, 76, 77, 79, 81, 83, 84, 86, 88, 90, 91, 92, 94, 95, 96, 97, 99, 100, 101, 103, 105, 107, 108, 110, 112, 114, 115, 116, 118, 119, 120, 121, 123, 124, 125, 127, 129, 131, 132, 134, 136, 138, 139, 140, 142, 143]
+
+**24 sensors (17%)**: Center of faces (4 per face).
+- Active: [6, 8, 15, 17, 30, 32, 39, 41, 54, 56, 63, 65, 78, 80, 87, 89, 102, 104, 111, 113, 126, 128, 135, 137]
+- Inactive: [0, 1, 2, 3, 4, 5, 7, 9, 10, 11, 12, 13, 14, 16, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 31, 33, 34, 35, 36, 37, 38, 40, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 55, 57, 58, 59, 60, 61, 62, 64, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 79, 81, 82, 83, 84, 85, 86, 88, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 103, 105, 106, 107, 108, 109, 110, 112, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 127, 129, 130, 131, 132, 133, 134, 136, 138, 139, 140, 141, 142, 143]
