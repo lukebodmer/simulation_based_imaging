@@ -6,8 +6,8 @@ simulation data, mapping sensor measurements to density profiles.
 
 from pathlib import Path
 
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
 
 from sbimaging.inverse_models.base import train_test_split_by_index
 from sbimaging.inverse_models.dim1.data import DataLoader1D, params_to_density_profile
@@ -60,6 +60,7 @@ def train_1d_inverse_model(
     downsample_factor: int = 4,
     noise_percent: float = 0.0,
     noise_seed: int | None = None,
+    large: bool = False,
 ) -> dict:
     """Train a 1D inverse model on FDTD simulation data.
 
@@ -76,6 +77,7 @@ def train_1d_inverse_model(
         noise_percent: Gaussian noise level as percentage of peak amplitude (0-100).
             Added to sensor data before training to test model robustness.
         noise_seed: Random seed for noise generation (for reproducibility).
+        large: Use larger network architecture with more capacity and dropout.
 
     Returns:
         Dictionary with training results and metrics.
@@ -101,7 +103,9 @@ def train_1d_inverse_model(
         logger.info(f"Added {noise_percent}% Gaussian noise (seed={noise_seed})")
 
     # Create and train model
-    model = NeuralNetwork1D(name="1d_inverse_mlp")
+    model = NeuralNetwork1D(name="1d_inverse_mlp", large=large)
+    if large:
+        logger.info("Using large network architecture (512→256→128 with 0.4 dropout)")
 
     # Track losses for plotting
     train_losses = []
@@ -289,6 +293,11 @@ if __name__ == "__main__":
         default=None,
         help="Random seed for noise generation (for reproducibility)",
     )
+    parser.add_argument(
+        "--large",
+        action="store_true",
+        help="Use larger network architecture (512→256→128 with higher dropout)",
+    )
 
     args = parser.parse_args()
 
@@ -303,4 +312,5 @@ if __name__ == "__main__":
         learning_rate=args.learning_rate,
         noise_percent=args.noise_percent,
         noise_seed=args.noise_seed,
+        large=args.large,
     )

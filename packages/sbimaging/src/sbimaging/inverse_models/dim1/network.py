@@ -23,17 +23,33 @@ class MLPRegressor1D(nn.Module):
     Simplified architecture suitable for ~500 training samples.
     """
 
-    def __init__(self, input_dim: int, output_dim: int):
+    def __init__(self, input_dim: int, output_dim: int, large: bool = False):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, 256),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(128, output_dim),
-        )
+        if large:
+            # Larger architecture with more capacity and regularization
+            self.net = nn.Sequential(
+                nn.Linear(input_dim, 512),
+                nn.ReLU(),
+                nn.Dropout(0.4),
+                nn.Linear(512, 256),
+                nn.ReLU(),
+                nn.Dropout(0.4),
+                nn.Linear(256, 128),
+                nn.ReLU(),
+                nn.Dropout(0.3),
+                nn.Linear(128, output_dim),
+            )
+        else:
+            # Original small architecture
+            self.net = nn.Sequential(
+                nn.Linear(input_dim, 256),
+                nn.ReLU(),
+                nn.Dropout(0.1),
+                nn.Linear(256, 128),
+                nn.ReLU(),
+                nn.Dropout(0.1),
+                nn.Linear(128, output_dim),
+            )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
@@ -92,14 +108,18 @@ class NeuralNetwork1D(InverseModel):
     def __init__(
         self,
         name: str = "neural_network_1d",
+        large: bool = False,
     ):
         """Initialize neural network model.
 
         Args:
             name: Model name.
+            large: Use larger architecture with more capacity and dropout.
+                   Recommended for datasets with 500+ samples.
         """
         super().__init__(name)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.large = large
         self._model: nn.Module | None = None
         self._input_dim: int | None = None
         self._output_dim: int | None = None
@@ -183,7 +203,9 @@ class NeuralNetwork1D(InverseModel):
             min_lr=1e-6,
         )
 
-        criterion = InclusionWeightedMSELoss(background_density=1.0, inclusion_weight=10.0)
+        criterion = InclusionWeightedMSELoss(
+            background_density=1.0, inclusion_weight=10.0
+        )
         use_amp = self.device.type == "cuda"
         scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
@@ -250,6 +272,7 @@ class NeuralNetwork1D(InverseModel):
             "model_state_dict": self._model.state_dict(),
             "input_dim": self._input_dim,
             "output_dim": self._output_dim,
+            "large": self.large,
             "train_indices": self.train_indices,
             "test_indices": self.test_indices,
         }
@@ -274,6 +297,7 @@ class NeuralNetwork1D(InverseModel):
 
         self._input_dim = data["input_dim"]
         self._output_dim = data["output_dim"]
+        self.large = data.get("large", False)
         self.train_indices = data.get("train_indices", [])
         self.test_indices = data.get("test_indices", [])
 
@@ -288,7 +312,7 @@ class NeuralNetwork1D(InverseModel):
         if self._input_dim is None or self._output_dim is None:
             raise RuntimeError("Input/output dimensions not set")
 
-        return MLPRegressor1D(self._input_dim, self._output_dim)
+        return MLPRegressor1D(self._input_dim, self._output_dim, large=self.large)
 
     def _train_epoch(
         self,
