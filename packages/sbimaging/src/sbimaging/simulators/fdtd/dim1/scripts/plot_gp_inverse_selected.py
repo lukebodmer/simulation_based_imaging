@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 import matplotlib.pyplot as plt
 import numpy as np
 
+from sbimaging.inverse_models.dim1.train import add_gaussian_noise
 from sbimaging.inverse_models.dim1 import (
     DataLoader1D,
     GaussianProcess1D,
@@ -129,6 +130,7 @@ def plot_density_comparison(
 
     ax.set_xlabel("Position (m)")
     ax.set_ylabel(r"Density (kg/m$^3$)")
+    ax.set_ylim(0, 4)
     ax.legend(loc="upper right")
 
 
@@ -201,6 +203,18 @@ def main():
         type=int,
         default=2,
         help="Number of columns in the figure",
+    )
+    parser.add_argument(
+        "--noise-percent",
+        type=float,
+        default=0.0,
+        help="Noise level to add to sensor data (should match training noise)",
+    )
+    parser.add_argument(
+        "--noise-seed",
+        type=int,
+        default=12345,
+        help="Random seed for noise generation",
     )
     parser.add_argument(
         "--format",
@@ -314,6 +328,11 @@ def main():
         sensor_file = sims_dir / sim_id / "sensor_data.npy"
         sensor_data = loader._load_sensor_data(sensor_file)
         X = sensor_data.reshape(1, -1)
+
+        # Add noise if specified (to match training conditions)
+        if args.noise_percent > 0:
+            rng = np.random.default_rng(args.noise_seed + plot_idx)
+            X = add_gaussian_noise(X, args.noise_percent, rng)
 
         # GP prediction
         gp_pred = None

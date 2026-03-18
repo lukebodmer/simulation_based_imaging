@@ -44,6 +44,18 @@ NORD_COLORS = {
     "nord15": "#b48ead",
 }
 
+# Publication color palette (light background, suitable for dissertations/papers)
+PUBLICATION_COLORS = {
+    "background": "#ffffff",
+    "panel_bg": "#ffffff",
+    "text": "#333333",
+    "text_light": "#666666",
+    "border": "#cccccc",
+    "accent": "#2c3e50",
+    "inclusion": "#4c00b0",  # Gold/yellow for inclusions (contrasts with blue-orange isosurfaces)
+    "sensors": "#34495e",  # Dark gray for sensors
+}
+
 
 def create_nord_diverging_cmap() -> mcolors.LinearSegmentedColormap:
     """Create a diverging colormap using Nord colors (blue-dark-red).
@@ -59,6 +71,56 @@ def create_nord_diverging_cmap() -> mcolors.LinearSegmentedColormap:
         NORD_COLORS["nord11"],  # Red (positive extreme)
     ]
     return mcolors.LinearSegmentedColormap.from_list("nord_diverging", colors)
+
+
+def create_publication_diverging_cmap() -> mcolors.LinearSegmentedColormap:
+    """Create a diverging colormap suitable for publications (blue-white-red).
+
+    Uses white center for print-friendly output and perceptually balanced
+    blue/red extremes that work well in grayscale.
+    """
+    colors = [
+        "#2166ac",  # Dark blue (negative extreme)
+        "#67a9cf",  # Light blue (negative mid)
+        "#f7f7f7",  # Near-white (zero/center)
+        "#ef8a62",  # Light red/salmon (positive mid)
+        "#b2182b",  # Dark red (positive extreme)
+    ]
+    return mcolors.LinearSegmentedColormap.from_list("publication_diverging", colors)
+
+
+def create_publication_3d_cmap() -> mcolors.LinearSegmentedColormap:
+    """Create a diverging colormap for 3D isosurfaces on white backgrounds.
+
+    Uses saturated colors throughout with a neutral gray center for
+    visibility against white backgrounds.
+    """
+    colors = [
+        "#08519c",  # Dark blue (negative extreme)
+        "#3182bd",  # Medium blue (negative mid)
+        "#969696",  # Medium gray (zero/center) - visible on white
+        "#e6550d",  # Orange (positive mid)
+        "#a63603",  # Dark orange/brown (positive extreme)
+    ]
+    return mcolors.LinearSegmentedColormap.from_list("publication_3d", colors)
+
+
+def create_publication_sensor_cmap() -> mcolors.LinearSegmentedColormap:
+    """Create a colormap for sensor recordings that matches 3D isosurface colors.
+
+    Uses the same saturated blue and orange as the 3D colormap but with
+    a white center for clean appearance on white backgrounds.
+    """
+    colors = [
+        "#08519c",  # Dark blue (negative extreme)
+        "#2171b5",  # Medium-dark blue
+        "#6baed6",  # Light blue
+        "#ffffff",  # White (center)
+        "#fd8d3c",  # Light orange
+        "#d94701",  # Medium-dark orange
+        "#a63603",  # Dark orange/brown (positive extreme)
+    ]
+    return mcolors.LinearSegmentedColormap.from_list("publication_sensor", colors)
 
 
 def apply_nord_style() -> None:
@@ -81,6 +143,38 @@ def apply_nord_style() -> None:
             "text.color": NORD_COLORS["nord6"],
             "savefig.facecolor": NORD_COLORS["nord0"],
             "savefig.edgecolor": NORD_COLORS["nord0"],
+        }
+    )
+
+
+def apply_publication_style() -> None:
+    """Apply publication-friendly matplotlib style settings.
+
+    Uses white/light background with dark text, suitable for
+    PhD dissertations and academic papers.
+    """
+    plt.rcParams.update(
+        {
+            "figure.facecolor": PUBLICATION_COLORS["background"],
+            "figure.edgecolor": PUBLICATION_COLORS["background"],
+            "axes.facecolor": PUBLICATION_COLORS["panel_bg"],
+            "axes.edgecolor": PUBLICATION_COLORS["border"],
+            "axes.labelcolor": PUBLICATION_COLORS["text"],
+            "axes.titlecolor": PUBLICATION_COLORS["text"],
+            "axes.titleweight": "medium",
+            "axes.titlesize": 11,
+            "axes.labelsize": 9,
+            "xtick.color": PUBLICATION_COLORS["text"],
+            "ytick.color": PUBLICATION_COLORS["text"],
+            "xtick.labelsize": 8,
+            "ytick.labelsize": 8,
+            "text.color": PUBLICATION_COLORS["text"],
+            "savefig.facecolor": PUBLICATION_COLORS["background"],
+            "savefig.edgecolor": PUBLICATION_COLORS["background"],
+            # Use serif font for publication quality
+            "font.family": "serif",
+            "font.serif": ["Times New Roman", "DejaVu Serif", "serif"],
+            "mathtext.fontset": "dejavuserif",
         }
     )
 
@@ -570,6 +664,8 @@ def render_3d_frame(
     show_inclusion: bool = True,
     inclusion_opacity: float = 0.3,
     sensor_locations: np.ndarray | None = None,
+    inclusion_color: str | None = None,
+    sensor_color: str | None = None,
 ) -> np.ndarray | None:
     """Render a single 3D frame.
 
@@ -588,6 +684,8 @@ def render_3d_frame(
         show_inclusion: Whether to show the inclusion overlay.
         inclusion_opacity: Opacity for the inclusion mesh.
         sensor_locations: Optional (N, 3) array of sensor coordinates to display.
+        inclusion_color: Color for inclusion mesh. Defaults to Nord yellow.
+        sensor_color: Color for sensor points. Defaults to Nord light gray.
 
     Returns:
         Rendered image as numpy array.
@@ -624,13 +722,14 @@ def render_3d_frame(
 
     # Add inclusion overlay if mesh data provided
     if show_inclusion and mesh is not None:
-        add_inclusion_mesh(plotter, mesh, opacity=inclusion_opacity)
+        add_inclusion_mesh(plotter, mesh, opacity=inclusion_opacity, color=inclusion_color)
 
-    # Add sensor locations (using Nord text color for consistency)
+    # Add sensor locations
     if sensor_locations is not None and len(sensor_locations) > 0:
+        sensor_pt_color = sensor_color if sensor_color else NORD_COLORS["nord4"]
         plotter.add_points(
             sensor_locations,
-            color=NORD_COLORS["nord4"],
+            color=sensor_pt_color,
             point_size=8,
             render_points_as_spheres=True,
         )
@@ -729,6 +828,9 @@ def render_3d_frame_isosurface(
     show_inclusion: bool = True,
     inclusion_opacity: float = 0.3,
     sensor_locations: np.ndarray | None = None,
+    inclusion_color: str | None = None,
+    sensor_color: str | None = None,
+    publication_style: bool = False,
 ) -> np.ndarray | None:
     """Render a single 3D frame using isosurfaces.
 
@@ -746,6 +848,9 @@ def render_3d_frame_isosurface(
         show_inclusion: Whether to show the inclusion overlay.
         inclusion_opacity: Opacity for the inclusion mesh.
         sensor_locations: Optional (N, 3) array of sensor coordinates to display.
+        inclusion_color: Color for inclusion mesh. Defaults to Nord yellow.
+        sensor_color: Color for sensor points. Defaults to Nord light gray.
+        publication_style: Use publication-friendly isosurface levels (skip near-zero).
 
     Returns:
         Rendered image as numpy array.
@@ -755,14 +860,23 @@ def render_3d_frame_isosurface(
     # Default isosurface levels: symmetric positive and negative
     if isosurface_levels is None:
         max_val = max(abs(clim[0]), abs(clim[1]))
-        isosurface_levels = [
-            -0.5 * max_val,
-            -0.2 * max_val,
-            -0.08 * max_val,
-            0.08 * max_val,
-            0.2 * max_val,
-            0.5 * max_val,
-        ]
+        if publication_style:
+            # Skip near-zero levels which would be near-white on white background
+            isosurface_levels = [
+                -0.5 * max_val,
+                -0.25 * max_val,
+                0.25 * max_val,
+                0.5 * max_val,
+            ]
+        else:
+            isosurface_levels = [
+                -0.5 * max_val,
+                -0.2 * max_val,
+                -0.08 * max_val,
+                0.08 * max_val,
+                0.2 * max_val,
+                0.5 * max_val,
+            ]
 
     # Build tetrahedral grid with pressure data
     grid = build_tetrahedral_grid(mesh, pressure)
@@ -792,13 +906,14 @@ def render_3d_frame_isosurface(
 
     # Add inclusion overlay
     if show_inclusion and mesh is not None:
-        add_inclusion_mesh(plotter, mesh, opacity=inclusion_opacity)
+        add_inclusion_mesh(plotter, mesh, opacity=inclusion_opacity, color=inclusion_color)
 
-    # Add sensor locations (using Nord text color for consistency)
+    # Add sensor locations
     if sensor_locations is not None and len(sensor_locations) > 0:
+        sensor_pt_color = sensor_color if sensor_color else NORD_COLORS["nord4"]
         plotter.add_points(
             sensor_locations,
-            color=NORD_COLORS["nord4"],
+            color=sensor_pt_color,
             point_size=8,
             render_points_as_spheres=True,
         )
@@ -1198,6 +1313,7 @@ def render_dev_frame(
     camera_radius: float = 2.5,
     camera_elevation: float = 35.0,
     camera_azimuth: float = 45.0,
+    publication_style: bool = False,
 ) -> bool:
     """Render a single frame from the middle of the simulation for quick testing.
 
@@ -1213,6 +1329,7 @@ def render_dev_frame(
         camera_radius: Distance of camera from center.
         camera_elevation: Camera elevation angle in degrees.
         camera_azimuth: Camera azimuth angle in degrees.
+        publication_style: Use publication-friendly colors (white background, serif fonts).
 
     Returns:
         True if frame was rendered successfully.
@@ -1332,18 +1449,36 @@ def render_dev_frame(
     figsize = (16, 6)
     dpi = 240
 
-    # Apply Nord styling
-    apply_nord_style()
-    field_cmap = create_nord_diverging_cmap()
-    plt.colormaps.register(field_cmap, name="nord_diverging", force=True)
-    cmap_name = "nord_diverging"
+    # Apply styling based on mode
+    if publication_style:
+        apply_publication_style()
+        cmap_3d = create_publication_3d_cmap()
+        cmap_sensor = create_publication_sensor_cmap()
+        plt.colormaps.register(cmap_3d, name="publication_3d", force=True)
+        plt.colormaps.register(cmap_sensor, name="publication_sensor", force=True)
+        cmap_name = "publication_3d"
+        sensor_cmap_name = "publication_sensor"
+        bg_color = PUBLICATION_COLORS["background"]
+        inclusion_color = PUBLICATION_COLORS["inclusion"]
+        sensor_color = PUBLICATION_COLORS["sensors"]
+        text_color = PUBLICATION_COLORS["text"]
+    else:
+        apply_nord_style()
+        field_cmap = create_nord_diverging_cmap()
+        plt.colormaps.register(field_cmap, name="nord_diverging", force=True)
+        cmap_name = "nord_diverging"
+        sensor_cmap_name = "nord_diverging"
+        bg_color = NORD_COLORS["nord0"]
+        inclusion_color = None  # Use default (nord13)
+        sensor_color = None  # Use default (nord4)
+        text_color = NORD_COLORS["nord4"]
 
     # Create plotter with proper size for the panel
     # Use a slightly taller height to match the sensor plot area (which has axes/labels)
     panel_width = int(figsize[0] / 2 * dpi)
     panel_height = int(figsize[1] * dpi * 1.1)
     plotter = pv.Plotter(off_screen=True, window_size=[panel_width, panel_height])
-    plotter.set_background(NORD_COLORS["nord0"])
+    plotter.set_background(bg_color)
 
     # Compute camera position
     camera_pos, focal_point, view_up = compute_camera_position_from_angles(
@@ -1368,6 +1503,9 @@ def render_dev_frame(
             show_inclusion=show_inclusion,
             inclusion_opacity=inclusion_opacity,
             sensor_locations=sensor_locations,
+            inclusion_color=inclusion_color,
+            sensor_color=sensor_color,
+            publication_style=publication_style,
         )
     else:
         image_3d = render_3d_frame(
@@ -1385,6 +1523,8 @@ def render_dev_frame(
             show_inclusion=show_inclusion,
             inclusion_opacity=inclusion_opacity,
             sensor_locations=sensor_locations,
+            inclusion_color=inclusion_color,
+            sensor_color=sensor_color,
         )
 
     plotter.close()
@@ -1426,7 +1566,7 @@ def render_dev_frame(
         im_sensor = ax_sensor.imshow(
             current_sensor_data,
             aspect="auto",
-            cmap=field_cmap,
+            cmap=sensor_cmap_name,
             origin="lower",
             vmin=-sensor_vmax,
             vmax=sensor_vmax,
@@ -1435,7 +1575,7 @@ def render_dev_frame(
 
         # Draw face separator lines at actual face boundaries
         if face_boundaries:
-            line_color = NORD_COLORS["nord4"]
+            line_color = text_color
             for boundary in face_boundaries[1:]:  # Skip first (always 0)
                 ax_sensor.axhline(
                     y=boundary, color=line_color, linewidth=1.0, alpha=0.7
@@ -1450,13 +1590,16 @@ def render_dev_frame(
             shrink=0.8,
         )
         cbar.ax.tick_params(labelsize=7)
-        cbar.ax.yaxis.set_tick_params(color=NORD_COLORS["nord4"])
-        cbar.outline.set_edgecolor(NORD_COLORS["nord3"])
+        border_color = (
+            PUBLICATION_COLORS["border"] if publication_style else NORD_COLORS["nord3"]
+        )
+        cbar.ax.yaxis.set_tick_params(color=text_color)
+        cbar.outline.set_edgecolor(border_color)
         plt.setp(
             plt.getp(cbar.ax.axes, "yticklabels"),
-            color=NORD_COLORS["nord4"],
+            color=text_color,
         )
-        cbar.set_label("Pressure", color=NORD_COLORS["nord4"])
+        cbar.set_label("Pressure", color=text_color)
 
         ax_sensor.set_xlabel("Time Step")
         ax_sensor.set_ylabel("Sensor Index")
@@ -1649,6 +1792,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Development mode: render single frame from middle for fast testing",
     )
+    parser.add_argument(
+        "--publication",
+        action="store_true",
+        help="Use publication-friendly colors (white background, serif fonts)",
+    )
 
     args = parser.parse_args()
     configure_logging()
@@ -1664,6 +1812,7 @@ if __name__ == "__main__":
             show_inclusion=not args.no_inclusion,
             inclusion_opacity=args.inclusion_opacity,
             isosurface_opacity=args.isosurface_opacity,
+            publication_style=args.publication,
         )
         if not success:
             exit(1)
