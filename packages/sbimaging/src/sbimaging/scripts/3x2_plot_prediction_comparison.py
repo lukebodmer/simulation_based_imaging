@@ -43,20 +43,11 @@ def kspace_to_voxels(data: np.ndarray, grid_size: int = 32) -> np.ndarray:
     return voxels
 
 
-# Camera views for orthogonal perspectives
-CAMERA_VIEWS = {
-    "front": {"azimuth": 0, "elevation": 0},      # Looking at XZ plane (Y=0 face)
-    "side": {"azimuth": 90, "elevation": 0},      # Looking at YZ plane (X=0 face)
-    "top": {"azimuth": 0, "elevation": 90},       # Looking down at XY plane (Z=1 face)
-}
-
-
 def render_ground_truth(
     config_path: Path,
     window_size: list[int] | None = None,
     cube_color: str = "yellow",
     cube_opacity: float = 1.0,
-    view: str = "front",
 ) -> np.ndarray | None:
     """Render ground truth cubes from simulation config.
 
@@ -65,13 +56,12 @@ def render_ground_truth(
         window_size: Size of the render window [width, height].
         cube_color: Color for the inclusion cubes.
         cube_opacity: Opacity for the cubes.
-        view: Camera view - "front", "side", or "top".
 
     Returns:
         Rendered image as numpy array, or None on error.
     """
     if window_size is None:
-        window_size = [800, 800]
+        window_size = [400, 400]
 
     # Load config
     with open(config_path, "rb") as f:
@@ -111,12 +101,10 @@ def render_ground_truth(
     plotter.show_grid(font_size=11)
     plotter.reset_camera()
 
-    # Set camera view
-    cam = CAMERA_VIEWS.get(view, CAMERA_VIEWS["front"])
-    plotter.camera.azimuth = cam["azimuth"]
-    plotter.camera.elevation = cam["elevation"]
-    plotter.enable_parallel_projection()
-    plotter.camera.zoom(0.80)
+    # Adjust camera: move left and down from the default diagonal view
+    plotter.camera.azimuth = -10
+    plotter.camera.elevation = -10
+    plotter.camera.zoom(0.80)  # Zoom out to show full axes
 
     plotter.render()
     image = plotter.screenshot(return_img=True)
@@ -133,7 +121,6 @@ def render_volume(
     cmap: str = "viridis",
     camera_position: list | None = None,
     box_size: float = 1.0,
-    view: str = "front",
 ) -> np.ndarray | None:
     """Render a 3D volume and return the image as a numpy array.
 
@@ -147,13 +134,12 @@ def render_volume(
         cmap: Colormap name.
         camera_position: Optional camera position list.
         box_size: Size of the domain bounding box.
-        view: Camera view - "front", "side", or "top".
 
     Returns:
         Rendered image as numpy array, or None on error.
     """
     if window_size is None:
-        window_size = [800, 800]
+        window_size = [400, 400]
 
     plotter = pv.Plotter(off_screen=True, window_size=window_size)
     plotter.set_background("white")
@@ -187,11 +173,9 @@ def render_volume(
         plotter.camera_position = camera_position
     else:
         plotter.reset_camera()
-        # Set camera view based on view parameter
-        cam = CAMERA_VIEWS.get(view, CAMERA_VIEWS["front"])
-        plotter.camera.azimuth = cam["azimuth"]
-        plotter.camera.elevation = cam["elevation"]
-        plotter.enable_parallel_projection()
+        # Adjust camera: move left and down from the default diagonal view
+        plotter.camera.azimuth = -10
+        plotter.camera.elevation = -10
         plotter.camera.zoom(0.80)  # Zoom out to show full axes
 
     plotter.render()
@@ -219,26 +203,21 @@ def create_comparison_figure(
     batch_name: str,
     model_name: str,
     output_path: Path,
-    num_samples: int = 3,
+    num_samples: int = 4,
     sample_indices: list[int] | None = None,
     grid_size: int = 32,
-    figsize: tuple[float, float] = (12, 18),
+    figsize: tuple[float, float] = (8, 12),
     dpi: int = 300,
     cmap: str = "viridis",
     opacity: str = "sigmoid",
 ) -> None:
     """Create a figure comparing ground truth vs predictions.
 
-    Creates a 3-column, 6-row figure (for 3 samples) where:
-    - Columns show front, side, and top orthogonal views
-    - Odd rows (1, 3, 5) show ground truth for each sample
-    - Even rows (2, 4, 6) show predictions for each sample
-
     Args:
         batch_name: Name of the simulation batch.
         model_name: Name of the trained model.
         output_path: Path to save the output figure.
-        num_samples: Number of samples to show (2 rows per sample).
+        num_samples: Number of samples to show (rows in the figure).
         sample_indices: Specific indices to use. If None, uses first num_samples.
         grid_size: Size of the voxel grid.
         figsize: Figure size in inches.
@@ -273,9 +252,8 @@ def create_comparison_figure(
     else:
         selected_files = pred_files[:num_samples]
 
-    num_samples_actual = len(selected_files)
-    num_rows = num_samples_actual * 2  # 2 rows per sample (ground truth + prediction)
-    logger.info(f"Creating figure with {num_samples_actual} samples ({num_rows} rows)")
+    num_rows = len(selected_files)
+    logger.info(f"Creating figure with {num_rows} samples")
 
     # Load prediction data (ground truth will be rendered from config)
     all_pred_voxels = []
@@ -297,71 +275,46 @@ def create_comparison_figure(
     pred_clim = (0.0, 2.0)
     logger.info(f"Prediction color limits: {pred_clim}")
 
-    # View names for columns
-    views = ["front", "side", "top"]
-
-    # Create figure with 3 columns and num_rows rows
-    fig, axes = plt.subplots(num_rows, 3, figsize=figsize)
+    # Create figure
+    fig, axes = plt.subplots(num_rows, 2, figsize=figsize)
     if num_rows == 1:
         axes = axes.reshape(1, -1)
 
     # Render each sample
-    for sample_idx in range(num_samples_actual):
-        sim_hash = selected_files[sample_idx].stem
-        logger.info(f"Processing sample {sample_idx + 1}/{num_samples_actual}: {sim_hash}")
+    for i in range(num_rows):
+        sim_hash = selected_files[i].stem
+        logger.info(f"Processing sample {i + 1}/{num_rows}: {sim_hash}")
 
-        config_path = all_config_paths[sample_idx]
-        pred_voxels = all_pred_voxels[sample_idx]
+        config_path = all_config_paths[i]
+        pred_voxels = all_pred_voxels[i]
 
-        gt_row = sample_idx * 2      # Ground truth row (0, 2, 4, ...)
-        pred_row = sample_idx * 2 + 1  # Prediction row (1, 3, 5, ...)
+        # Render ground truth from config (shows actual cube locations)
+        gt_image = render_ground_truth(config_path)
 
-        # Render each view
-        for col_idx, view in enumerate(views):
-            # Render ground truth from config (shows actual cube locations)
-            gt_image = render_ground_truth(config_path, view=view)
-
-            # Render prediction with 0-2 range
-            pred_image = render_volume(
-                pred_voxels,
-                clim=pred_clim,
-                cmap=cmap,
-                opacity=opacity,
-                view=view,
-            )
-
-            # Add ground truth to figure
-            if gt_image is not None:
-                axes[gt_row, col_idx].imshow(gt_image)
-            axes[gt_row, col_idx].axis("off")
-
-            # Add prediction to figure
-            if pred_image is not None:
-                axes[pred_row, col_idx].imshow(pred_image)
-            axes[pred_row, col_idx].axis("off")
-
-        # Add row labels on the left side
-        axes[gt_row, 0].set_ylabel(
-            f"Sample {sample_idx + 1}\nGround Truth",
-            fontsize=10,
-            rotation=0,
-            ha="right",
-            va="center",
+        # Render prediction with 0-2 range
+        pred_image = render_volume(
+            pred_voxels,
+            clim=pred_clim,
+            cmap=cmap,
+            opacity=opacity,
         )
-        axes[pred_row, 0].set_ylabel(
-            f"Sample {sample_idx + 1}\nPrediction",
-            fontsize=10,
-            rotation=0,
-            ha="right",
-            va="center",
+
+        # Add to figure
+        if gt_image is not None:
+            axes[i, 0].imshow(gt_image)
+        axes[i, 0].axis("off")
+        if pred_image is not None:
+            axes[i, 1].imshow(pred_image)
+        axes[i, 1].axis("off")
+
+        # Add row label
+        axes[i, 0].set_ylabel(
+            f"Sample {i + 1}", fontsize=10, rotation=0, ha="right", va="center"
         )
 
     # Add column titles
-    view_titles = ["Front View", "Side View", "Top View"]
-    for col_idx, title in enumerate(view_titles):
-        axes[0, col_idx].set_title(
-            title, fontsize=12, fontweight="light", fontfamily="serif"
-        )
+    axes[0, 0].set_title("Ground Truth", fontsize=12, fontweight="light", fontfamily="serif")
+    axes[0, 1].set_title("Prediction", fontsize=12, fontweight="light", fontfamily="serif")
 
     plt.tight_layout()
     fig.savefig(output_path, dpi=dpi, bbox_inches="tight", facecolor="white")
@@ -425,7 +378,7 @@ if __name__ == "__main__":
         "--figsize",
         type=float,
         nargs=2,
-        default=[12, 18],
+        default=[8, 9],
         help="Figure size in inches (width height)",
     )
     parser.add_argument(
